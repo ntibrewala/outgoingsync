@@ -6,7 +6,7 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProjectGuid>{B0A7CE1C-1E6D-4853-AEE3-C52902BFD68A}</ProjectGuid>
     <OutputType>Exe</OutputType>
-    <StartupObject>OutgoingPaymentSync.OutgoingPaymentSync</StartupObject>
+    <StartupObject>OutgoingPaymentSync.manualrecocom</StartupObject>
     <RootNamespace>OutgoingPaymentSync</RootNamespace>
     <AssemblyName>OutgoingPaymentSync</AssemblyName>
     <FileAlignment>512</FileAlignment>
