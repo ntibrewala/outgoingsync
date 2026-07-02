@@ -154,7 +154,7 @@ Module OutgoingPaymentSync
     Function HasCompletedPayments(conn As HanaConnection) As Boolean
         Using cmd As New HanaCommand(
             "SELECT 1 FROM ""DBS_BANK"".""PENDING_PAYMENTS"" " &
-            "WHERE ""BankStatus""='COMPLETED' AND IFNULL(""Processed"",'N')<>'Y' LIMIT 1", conn)
+            "WHERE ""BankStatus""='COMPLETED' AND IFNULL(""Processed"",'N')='N' LIMIT 1", conn)
             Return cmd.ExecuteScalar() IsNot Nothing
         End Using
     End Function
