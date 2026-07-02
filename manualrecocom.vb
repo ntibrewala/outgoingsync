@@ -112,7 +112,13 @@ Module manualrecocom
     Private Function SlLogin() As String
         Using client As New HttpClient()
             Dim loginUrl As String = $"{slUrl}/Login"
-            Dim payload As String = $"{{""CompanyDB"": ""{sapSchema}"", ""UserName"": ""{slUser}"", ""Password"": ""{slPass}""}}"
+            
+            Dim payloadObj As New JObject()
+            payloadObj("CompanyDB") = sapSchema
+            payloadObj("UserName") = slUser
+            payloadObj("Password") = slPass
+            Dim payload As String = JsonConvert.SerializeObject(payloadObj)
+            
             Dim content As New StringContent(payload, Encoding.UTF8, "application/json")
             
             Dim response = client.PostAsync(loginUrl, content).Result
