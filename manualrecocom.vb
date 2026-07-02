@@ -103,7 +103,6 @@ Module manualrecocom
             Catch ex As Exception
                 Logger.Log("[" & runId & "] FATAL ERROR: " & ex.Message)
             Finally
-                ' Always logout and close
                 SlLogout()
                 If conn.State = System.Data.ConnectionState.Open Then
                     conn.Close()
@@ -114,8 +113,9 @@ Module manualrecocom
     End Sub
 
     Private Sub SlLogin()
+        ' Disable automatic cookie handling — we manage B1SESSION manually
         Dim handler As New HttpClientHandler()
-        handler.UseCookies = True
+        handler.UseCookies = False
         handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
 
         slClient = New HttpClient(handler)
@@ -134,6 +134,24 @@ Module manualrecocom
         If Not response.IsSuccessStatusCode Then
             Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
         End If
+
+        ' Extract SessionId from JSON response and set as default Cookie header
+        Dim jsonResp As JObject = JObject.Parse(response.Content.ReadAsStringAsync().Result)
+        Dim sessionId As String = jsonResp("SessionId").ToString()
+
+        ' Build cookie string: B1SESSION is required, ROUTEID helps with load balancing
+        Dim cookieStr As String = "B1SESSION=" & sessionId
+        If response.Headers.Contains("Set-Cookie") Then
+            For Each setCookie In response.Headers.GetValues("Set-Cookie")
+                If setCookie.StartsWith("ROUTEID=") Then
+                    Dim routeId As String = setCookie.Split(";"c)(0)
+                    cookieStr &= "; " & routeId
+                    Exit For
+                End If
+            Next
+        End If
+
+        slClient.DefaultRequestHeaders.Add("Cookie", cookieStr)
     End Sub
 
     Private Sub SlLogout()

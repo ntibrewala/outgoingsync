@@ -27,8 +27,9 @@ Module OutgoingPaymentSync
     End Sub
 
     Private Sub SlLogin()
+        ' Disable automatic cookie handling — we manage B1SESSION manually
         Dim handler As New HttpClientHandler()
-        handler.UseCookies = True
+        handler.UseCookies = False
         handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
 
         slClient = New HttpClient(handler)
@@ -47,6 +48,24 @@ Module OutgoingPaymentSync
         If Not response.IsSuccessStatusCode Then
             Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
         End If
+
+        ' Extract SessionId from JSON response and set as default Cookie header
+        Dim jsonResp As JObject = JObject.Parse(response.Content.ReadAsStringAsync().Result)
+        Dim sessionId As String = jsonResp("SessionId").ToString()
+
+        ' Build cookie string: B1SESSION is required, ROUTEID helps with load balancing
+        Dim cookieStr As String = "B1SESSION=" & sessionId
+        If response.Headers.Contains("Set-Cookie") Then
+            For Each setCookie In response.Headers.GetValues("Set-Cookie")
+                If setCookie.StartsWith("ROUTEID=") Then
+                    Dim routeId As String = setCookie.Split(";"c)(0)
+                    cookieStr &= "; " & routeId
+                    Exit For
+                End If
+            Next
+        End If
+
+        slClient.DefaultRequestHeaders.Add("Cookie", cookieStr)
     End Sub
 
     Private Sub SlLogout()
@@ -146,9 +165,7 @@ Module OutgoingPaymentSync
         Logger.Log("[" & runId & "] Fetching completed payments")
 
         Using cmd As New HanaCommand("CALL ""DBS_BANK"".""BHV_GET_COMPLETED_PAYMENTS""()", conn)
-
             Using reader = cmd.ExecuteReader()
-
                 While reader.Read()
 
                     Dim id As String = reader("Id").ToString()
@@ -163,9 +180,7 @@ Module OutgoingPaymentSync
 
                     Try
                         Dim paymentDocEntry As Integer = CreateOutgoingPayment(vendor, amount, txnDate, conn)
-
                         UpdatePaymentProcessed(id, paymentDocEntry, conn)
-
                         Logger.Log($"[{runId}] SUCCESS | ID={id} | DocEntry={paymentDocEntry}")
 
                     Catch ex As Exception
@@ -174,7 +189,6 @@ Module OutgoingPaymentSync
                     End Try
 
                 End While
-
             End Using
         End Using
 
@@ -182,21 +196,15 @@ Module OutgoingPaymentSync
 
     '============================================================
     Function GetApprovedDate(conn As HanaConnection, id As String) As Date
-
         Using cmd As New HanaCommand(
         "SELECT ""ApprovedAt"" FROM ""DBS_BANK"".""PENDING_PAYMENTS"" WHERE ""Id""=?", conn)
-
             cmd.Parameters.AddWithValue("p1", id)
             Dim result = cmd.ExecuteScalar()
-
             If result IsNot Nothing Then
                 Return Convert.ToDateTime(result).Date
             End If
-
         End Using
-
         Return DateTime.Today
-
     End Function
 
     '============================================================
@@ -241,7 +249,6 @@ Module OutgoingPaymentSync
             acctRow("SumPaid") = amount
             acctRow("Decription") = "DBS Bank Payment - " & vendor
             accountArray.Add(acctRow)
-
             payloadObj("PaymentAccounts") = accountArray
         End If
 
@@ -263,7 +270,6 @@ Module OutgoingPaymentSync
 
     '============================================================
     Sub UpdatePaymentProcessed(id As String, docEntry As Integer, conn As HanaConnection)
-
         Using cmd As New HanaCommand(
             "CALL ""DBS_BANK"".""BHV_MARK_PAYMENT_PROCESSED""(?,?)", conn)
             cmd.Parameters.AddWithValue("p_id", id)
@@ -277,20 +283,16 @@ Module OutgoingPaymentSync
             cmd2.Parameters.AddWithValue("p_id", id)
             cmd2.ExecuteNonQuery()
         End Using
-
     End Sub
 
     Sub UpdatePaymentError(id As String, errorMsg As String, conn As HanaConnection)
-
         Dim safeError = If(errorMsg.Length > 500, errorMsg.Substring(0, 500), errorMsg)
-
         Using cmd As New HanaCommand(
             "UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""ErrorDescription""=? WHERE ""Id""=?", conn)
             cmd.Parameters.AddWithValue("p_error", safeError)
             cmd.Parameters.AddWithValue("p_id", id)
             cmd.ExecuteNonQuery()
         End Using
-
     End Sub
 
     Public Sub RunOutgoing()
