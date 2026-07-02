@@ -186,6 +186,11 @@ Module OutgoingPaymentSync
                     Catch ex As Exception
                         UpdatePaymentError(id, ex.Message, conn)
                         Logger.Log($"[{runId}] ERROR | ID={id} | {ex.Message}")
+                        
+                        ' Reset Service Layer session in case the error corrupted the backend DI context
+                        Logger.Log($"[{runId}] Resetting Service Layer session due to error...")
+                        SlLogout()
+                        SlLogin()
                     End Try
 
                 End While
