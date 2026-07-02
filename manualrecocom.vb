@@ -35,6 +35,7 @@ Module manualrecocom
     Sub Main()
         BypassSSL()
         Dim runId As String = Guid.NewGuid().ToString()
+        Logger.StartSession()
         Logger.Log("========== [ManualReco START] RunId=" & runId & " ==========")
 
         Dim connString As String = $"Server={hanaHost}:{hanaPort};UserID={hanaUser};Password={hanaPass}"
@@ -109,6 +110,7 @@ Module manualrecocom
                     conn.Close()
                 End If
                 Logger.Log("========== [ManualReco END] RunId=" & runId & " ==========")
+                Logger.EndSession()
             End Try
         End Using
     End Sub
