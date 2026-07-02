@@ -51,7 +51,7 @@ Module manualrecocom
                            IFNULL(P.""Reconciled"",'N') AS ""ReconState"" 
                     FROM ""DBS_BANK"".""PENDING_PAYMENTS"" P 
                     WHERE P.""Processed"" = 'Y' 
-                    AND IFNULL(P.""Reconciled"",'N') IN ('N','1','2') 
+                    AND IFNULL(P.""Reconciled"",'N') = 'N' 
                     AND P.""InvoicesJson"" IS NOT NULL 
                     AND TO_NVARCHAR(P.""InvoicesJson"") <> '[]'
                     LIMIT 1
