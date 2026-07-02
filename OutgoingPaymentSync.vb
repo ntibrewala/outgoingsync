@@ -19,6 +19,7 @@ Module OutgoingPaymentSync
 
     Private Sub BypassSSL()
         ServicePointManager.ServerCertificateValidationCallback = Function(s, cert, chain, sslPolicyErrors) True
+        ServicePointManager.Expect100Continue = False
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 Or SecurityProtocolType.Tls11 Or SecurityProtocolType.Tls
     End Sub
 
