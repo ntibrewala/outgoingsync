@@ -74,7 +74,7 @@ Module manualrecocom
                 Logger.Log("[" & runId & "] Fetching pending payments... Found " & records.Count)
 
                 ' Login to Service Layer
-                Dim slCookies As String = SlLogin()
+                Dim slCookies As CookieContainer = SlLogin()
 
                 For Each rec In records
                     Logger.Log("[" & runId & "] START Payment | ID=" & rec.Id & " | Vendor=" & rec.VendorCode & " | DocEntry=" & rec.DocEntry & " | State=" & rec.State)
@@ -110,8 +110,11 @@ Module manualrecocom
         End Using
     End Sub
 
-    Private Function SlLogin() As String
+    Private Function SlLogin() As CookieContainer
+        Dim cookieContainer As New CookieContainer()
         Dim handler As New HttpClientHandler()
+        handler.CookieContainer = cookieContainer
+        handler.UseCookies = True
         handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
         
         Using client As New HttpClient(handler)
@@ -129,18 +132,22 @@ Module manualrecocom
             
             Dim response = client.SendAsync(request).Result
             If response.IsSuccessStatusCode Then
-                Dim cookies = response.Headers.GetValues("Set-Cookie")
-                Return String.Join(";", cookies)
+                Return cookieContainer
             Else
                 Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
             End If
         End Using
     End Function
 
-    Private Sub SlLogout(cookies As String)
-        Using client As New HttpClient()
-            client.DefaultRequestHeaders.Add("Cookie", cookies)
-            Dim dummy = client.PostAsync($"{slUrl}/Logout", Nothing).Result
+    Private Sub SlLogout(cookieContainer As CookieContainer)
+        Dim handler As New HttpClientHandler()
+        handler.CookieContainer = cookieContainer
+        handler.UseCookies = True
+        handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
+        Using client As New HttpClient(handler)
+            Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Logout")
+            request.Headers.ExpectContinue = False
+            Dim dummy = client.SendAsync(request).Result
         End Using
     End Sub
 
@@ -189,7 +196,7 @@ Module manualrecocom
         Throw New Exception($"Invoice JE line not found | TransId={invTransId} | BP={vendorCode}")
     End Function
 
-    Private Sub ReconcilePayment(cookies As String, conn As HanaConnection, vendor As String, paymentDocEntry As Integer, invoicesJson As String, runId As String)
+    Private Sub ReconcilePayment(cookies As CookieContainer, conn As HanaConnection, vendor As String, paymentDocEntry As Integer, invoicesJson As String, runId As String)
         
         ' 1. Get Payment JE Line Details
         Dim payInfo = GetPaymentJEInfo(conn, paymentDocEntry, vendor)
@@ -245,12 +252,17 @@ Module manualrecocom
         
         ' 6. Post to the Hidden Service Layer Action Endpoint
         Logger.Log("[" & runId & "] Posting reconciliation to Service Layer...")
-        Using client As New HttpClient()
-            client.DefaultRequestHeaders.Add("Cookie", cookies)
+        Dim handler As New HttpClientHandler()
+        handler.CookieContainer = cookies
+        handler.UseCookies = True
+        handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
+        Using client As New HttpClient(handler)
             Dim url As String = $"{slUrl}/InternalReconciliationsService_Add"
-            Dim content As New StringContent(payloadStr, Encoding.UTF8, "application/json")
+            Dim request As New HttpRequestMessage(HttpMethod.Post, url)
+            request.Content = New StringContent(payloadStr, Encoding.UTF8, "application/json")
+            request.Headers.ExpectContinue = False
             
-            Dim response = client.PostAsync(url, content).Result
+            Dim response = client.SendAsync(request).Result
             If response.IsSuccessStatusCode OrElse response.StatusCode = HttpStatusCode.Created OrElse response.StatusCode = HttpStatusCode.NoContent Then
                 Logger.Log("[" & runId & "] Reconciliation DONE | PaymentDocEntry=" & paymentDocEntry)
             Else

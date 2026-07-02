@@ -23,8 +23,11 @@ Module OutgoingPaymentSync
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 Or SecurityProtocolType.Tls11 Or SecurityProtocolType.Tls
     End Sub
 
-    Private Function SlLogin() As String
+    Private Function SlLogin() As CookieContainer
+        Dim cookieContainer As New CookieContainer()
         Dim handler As New HttpClientHandler()
+        handler.CookieContainer = cookieContainer
+        handler.UseCookies = True
         handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
         
         Using client As New HttpClient(handler)
@@ -42,18 +45,22 @@ Module OutgoingPaymentSync
             
             Dim response = client.SendAsync(request).Result
             If response.IsSuccessStatusCode Then
-                Dim cookies = response.Headers.GetValues("Set-Cookie")
-                Return String.Join(";", cookies)
+                Return cookieContainer
             Else
                 Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
             End If
         End Using
     End Function
 
-    Private Sub SlLogout(cookies As String)
-        Using client As New HttpClient()
-            client.DefaultRequestHeaders.Add("Cookie", cookies)
-            Dim dummy = client.PostAsync($"{slUrl}/Logout", Nothing).Result
+    Private Sub SlLogout(cookieContainer As CookieContainer)
+        Dim handler As New HttpClientHandler()
+        handler.CookieContainer = cookieContainer
+        handler.UseCookies = True
+        handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
+        Using client As New HttpClient(handler)
+            Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Logout")
+            request.Headers.ExpectContinue = False
+            Dim dummy = client.SendAsync(request).Result
         End Using
     End Sub
 
@@ -99,7 +106,7 @@ Module OutgoingPaymentSync
                 ' SAP CONNECT (Service Layer)
                 '=========================
                 BypassSSL()
-                Dim slCookies As String = SlLogin()
+                Dim slCookies As CookieContainer = SlLogin()
                 Logger.Log("[" & runId & "] SAP Service Layer Connected")
 
                 ProcessCompletedPayments(conn, slCookies, runId)
@@ -135,7 +142,7 @@ Module OutgoingPaymentSync
     End Function
 
     '============================================================
-    Sub ProcessCompletedPayments(conn As HanaConnection, slCookies As String, runId As String)
+    Sub ProcessCompletedPayments(conn As HanaConnection, slCookies As CookieContainer, runId As String)
 
         Logger.Log("[" & runId & "] Fetching completed payments")
 
@@ -194,7 +201,7 @@ Module OutgoingPaymentSync
     End Function
 
     '============================================================
-    Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date, conn As HanaConnection, slCookies As String) As Integer
+    Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date, conn As HanaConnection, slCookies As CookieContainer) As Integer
 
         ' Determine CardType from HANA directly instead of DI API
         Dim cardType As String = ""
@@ -239,12 +246,17 @@ Module OutgoingPaymentSync
 
         Dim payloadStr As String = JsonConvert.SerializeObject(payloadObj)
         
-        Using client As New HttpClient()
-            client.DefaultRequestHeaders.Add("Cookie", slCookies)
+        Dim handler As New HttpClientHandler()
+        handler.CookieContainer = slCookies
+        handler.UseCookies = True
+        handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
+        Using client As New HttpClient(handler)
             Dim url As String = $"{slUrl}/VendorPayments"
-            Dim content As New StringContent(payloadStr, Encoding.UTF8, "application/json")
+            Dim request As New HttpRequestMessage(HttpMethod.Post, url)
+            request.Content = New StringContent(payloadStr, Encoding.UTF8, "application/json")
+            request.Headers.ExpectContinue = False
             
-            Dim response = client.PostAsync(url, content).Result
+            Dim response = client.SendAsync(request).Result
             If response.IsSuccessStatusCode OrElse response.StatusCode = HttpStatusCode.Created Then
                 Dim jsonResp As JObject = JObject.Parse(response.Content.ReadAsStringAsync().Result)
                 Return Convert.ToInt32(jsonResp("DocEntry"))
