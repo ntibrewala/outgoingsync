@@ -7,7 +7,7 @@
     <ProjectGuid>{A1B2C3D4-E5F6-4758-B9A0-D63A12C4E79B}</ProjectGuid>
     <OutputType>Exe</OutputType>
     <StartupObject>manualrecocom.manualrecocom</StartupObject>
-    <RootNamespace>manualrecocom</RootNamespace>
+    <RootNamespace>OutgoingPaymentSync</RootNamespace>
     <AssemblyName>manualrecocom</AssemblyName>
     <FileAlignment>512</FileAlignment>
     <MyType>Console</MyType>
