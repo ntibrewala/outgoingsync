@@ -1,15 +1,17 @@
 Imports System
 Imports Sap.Data.Hana
+Imports Bhavya.SAP.Core
 
 Module Cleanup
     Sub Main()
         Dim connString As String = "Server=10.10.0.113:30015;UserID=SYSTEM;Password=B1sap#2025"
         
-        Console.WriteLine("========== [Cleanup START] " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") & " ==========")
+        Logger.StartSession()
+        Logger.Log("========== [Cleanup START] " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") & " ==========")
         Try
             Using conn As New HanaConnection(connString)
                 conn.Open()
-                Console.WriteLine("Connected to HANA.")
+                Logger.Log("Connected to HANA.")
                 
                 ' Create/Update the procedure just in case
                 Dim createProcSql As String = "CREATE OR REPLACE PROCEDURE ""DBS_BANK"".""BHV_UPDATE_PROCESSED_RECONCILED"" () " &
@@ -30,17 +32,18 @@ Module Cleanup
                 End Using
                 
                 ' Execute the cleanup procedure
-                Console.WriteLine("Running BHV_UPDATE_PROCESSED_RECONCILED...")
+                Logger.Log("Running BHV_UPDATE_PROCESSED_RECONCILED...")
                 Using cmdExec As New HanaCommand("CALL ""DBS_BANK"".""BHV_UPDATE_PROCESSED_RECONCILED""()", conn)
                     cmdExec.ExecuteNonQuery()
                 End Using
                 
-                Console.WriteLine("Cleanup completed successfully.")
+                Logger.Log("Cleanup completed successfully.")
             End Using
         Catch ex As Exception
-            Console.WriteLine("FATAL ERROR: " & ex.ToString())
+            Logger.Log("FATAL ERROR: " & ex.ToString())
         Finally
-            Console.WriteLine("========== [Cleanup END] " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") & " ==========")
+            Logger.Log("========== [Cleanup END] " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") & " ==========")
         End Try
+        Logger.EndSession()
     End Sub
 End Module
