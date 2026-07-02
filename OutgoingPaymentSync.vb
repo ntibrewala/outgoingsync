@@ -205,7 +205,8 @@ Module OutgoingPaymentSync
 
         ' Determine CardType from HANA directly instead of DI API
         Dim cardType As String = ""
-        Using cmd As New HanaCommand($"SELECT ""CardType"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""='{vendor}'", conn)
+        Using cmd As New HanaCommand($"SELECT ""CardType"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""=?", conn)
+            cmd.Parameters.AddWithValue("p_vendor", vendor)
             Using reader = cmd.ExecuteReader()
                 If reader.Read() Then
                     cardType = reader("CardType").ToString()
@@ -228,7 +229,8 @@ Module OutgoingPaymentSync
             payloadObj("DocType") = "rAccount"
             
             Dim controlAcct As String = "210001"
-            Using cmd As New HanaCommand($"SELECT ""DebPayAcct"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""='{vendor}'", conn)
+            Using cmd As New HanaCommand($"SELECT ""DebPayAcct"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""=?", conn)
+                cmd.Parameters.AddWithValue("p_vendor", vendor)
                 Using reader = cmd.ExecuteReader()
                     If reader.Read() Then controlAcct = reader("DebPayAcct").ToString()
                 End Using

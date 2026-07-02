@@ -51,53 +51,53 @@ Module manualrecocom
                     AND P.""InvoicesJson"" IS NOT NULL 
                     AND TO_NVARCHAR(P.""InvoicesJson"") <> '[]'
                 "
-                Dim cmd As New HanaCommand(sql, conn)
-                Dim reader As HanaDataReader = cmd.ExecuteReader()
-                
-                Dim records As New List(Of Object)()
-                While reader.Read()
-                    records.Add(New With {
-                        .Id = reader.GetString(0),
-                        .VendorCode = reader.GetString(1),
-                        .DocEntry = reader.GetInt32(2),
-                        .InvoicesJson = reader.GetString(3),
-                        .State = reader.GetString(4)
-                    })
-                End While
-                reader.Close()
+                Using cmd As New HanaCommand(sql, conn)
+                    Using reader As HanaDataReader = cmd.ExecuteReader()
+                        Dim records As New List(Of Object)()
+                        While reader.Read()
+                            records.Add(New With {
+                                .Id = reader.GetString(0),
+                                .VendorCode = reader.GetString(1),
+                                .DocEntry = reader.GetInt32(2),
+                                .InvoicesJson = reader.GetString(3),
+                                .State = reader.GetString(4)
+                            })
+                        End While
 
-                If records.Count = 0 Then
-                    Logger.Log("[" & runId & "] No pending records found. Exiting.")
-                    Return
-                End If
+                        If records.Count = 0 Then
+                            Logger.Log("[" & runId & "] No pending records found. Exiting.")
+                            Return
+                        End If
 
-                Logger.Log("[" & runId & "] Fetching pending payments... Found " & records.Count)
+                        Logger.Log("[" & runId & "] Fetching pending payments... Found " & records.Count)
 
-                ' Login to Service Layer
-                Dim slCookies As CookieContainer = SlLogin()
+                        ' Login to Service Layer
+                        Dim slCookies As CookieContainer = SlLogin()
 
-                For Each rec In records
-                    Logger.Log("[" & runId & "] START Payment | ID=" & rec.Id & " | Vendor=" & rec.VendorCode & " | DocEntry=" & rec.DocEntry & " | State=" & rec.State)
-                    
-                    Try
-                        ReconcilePayment(slCookies, conn, rec.VendorCode, rec.DocEntry, rec.InvoicesJson, runId)
-                        UpdateReconciled(conn, rec.Id, "Y")
-                        Logger.Log("[" & runId & "] SUCCESS Payment ID=" & rec.Id)
-                    Catch ex As Exception
-                        Dim nextState As String = "1"
-                        If rec.State = "1" Then nextState = "2"
-                        If rec.State = "2" Then nextState = "F"
-                        
-                        UpdateReconciled(conn, rec.Id, nextState)
-                        Logger.Log("[" & runId & "] Updated Reconciled state to " & nextState & " for ID=" & rec.Id)
-                        Logger.Log("[" & runId & "] ERROR: FAILED Payment ID=" & rec.Id & " | Error=" & ex.Message)
-                    End Try
-                    
-                    Logger.Log("[" & runId & "] END Payment ID=" & rec.Id)
-                Next
+                        For Each rec In records
+                            Logger.Log("[" & runId & "] START Payment | ID=" & rec.Id & " | Vendor=" & rec.VendorCode & " | DocEntry=" & rec.DocEntry & " | State=" & rec.State)
+                            
+                            Try
+                                ReconcilePayment(slCookies, conn, rec.VendorCode, rec.DocEntry, rec.InvoicesJson, runId)
+                                UpdateReconciled(conn, rec.Id, "Y")
+                                Logger.Log("[" & runId & "] SUCCESS Payment ID=" & rec.Id)
+                            Catch ex As Exception
+                                Dim nextState As String = "1"
+                                If rec.State = "1" Then nextState = "2"
+                                If rec.State = "2" Then nextState = "F"
+                                
+                                UpdateReconciled(conn, rec.Id, nextState)
+                                Logger.Log("[" & runId & "] Updated Reconciled state to " & nextState & " for ID=" & rec.Id)
+                                Logger.Log("[" & runId & "] ERROR: FAILED Payment ID=" & rec.Id & " | Error=" & ex.Message)
+                            End Try
+                            
+                            Logger.Log("[" & runId & "] END Payment ID=" & rec.Id)
+                        Next
 
-                ' Logout of Service Layer
-                SlLogout(slCookies)
+                        ' Logout of Service Layer
+                        SlLogout(slCookies)
+                    End Using
+                End Using
 
             Catch ex As Exception
                 Logger.Log("[" & runId & "] FATAL ERROR: " & ex.Message)
@@ -152,8 +152,10 @@ Module manualrecocom
     End Sub
 
     Private Sub UpdateReconciled(conn As HanaConnection, id As String, state As String)
-        Dim sql As String = $"UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""Reconciled""='{state}' WHERE ""Id""='{id}'"
+        Dim sql As String = "UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""Reconciled""=? WHERE ""Id""=?"
         Using cmd As New HanaCommand(sql, conn)
+            cmd.Parameters.AddWithValue("p_state", state)
+            cmd.Parameters.AddWithValue("p_id", id)
             cmd.ExecuteNonQuery()
         End Using
     End Sub
@@ -163,10 +165,12 @@ Module manualrecocom
             SELECT V.""TransId"", J.""Line_ID"" 
             FROM ""{sapSchema}"".""OVPM"" V 
             INNER JOIN ""{sapSchema}"".""JDT1"" J ON V.""TransId"" = J.""TransId"" 
-            WHERE V.""DocEntry"" = {paymentDocEntry} 
-            AND J.""Debit"" > 0 AND J.""ShortName"" = '{vendorCode}'
+            WHERE V.""DocEntry"" = ? 
+            AND J.""Debit"" > 0 AND J.""ShortName"" = ?
         "
         Using cmd As New HanaCommand(sql, conn)
+            cmd.Parameters.AddWithValue("p_docentry", paymentDocEntry)
+            cmd.Parameters.AddWithValue("p_vendor", vendorCode)
             Using reader As HanaDataReader = cmd.ExecuteReader()
                 If reader.Read() Then
                     Return New Tuple(Of Integer, Integer)(reader.GetInt32(0), reader.GetInt32(1))
@@ -180,10 +184,12 @@ Module manualrecocom
         Dim sql As String = $"
             SELECT J.""Line_ID"", J.""Debit"", J.""Credit"" 
             FROM ""{sapSchema}"".""JDT1"" J 
-            WHERE J.""TransId"" = {invTransId} 
-            AND J.""ShortName"" = '{vendorCode}'
+            WHERE J.""TransId"" = ? 
+            AND J.""ShortName"" = ?
         "
         Using cmd As New HanaCommand(sql, conn)
+            cmd.Parameters.AddWithValue("p_transid", invTransId)
+            cmd.Parameters.AddWithValue("p_vendor", vendorCode)
             Using reader As HanaDataReader = cmd.ExecuteReader()
                 If reader.Read() Then
                     Dim debit As Double = reader.GetDouble(1)
