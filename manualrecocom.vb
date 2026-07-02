@@ -10,7 +10,7 @@ Imports Bhavya.SAP.Core
 Module manualrecocom
 
     Dim sapSchema As String = "BHAVYA_POLYFILMS_01"
-    
+
     ' HANA DB Config
     Dim hanaHost As String = "10.10.0.113"
     Dim hanaPort As String = "30015"
@@ -21,6 +21,9 @@ Module manualrecocom
     Dim slUrl As String = "https://10.10.0.113:50000/b1s/v1"
     Dim slUser As String = "manager"
     Dim slPass As String = "bppl@123"
+
+    ' Single shared HttpClient for the entire SL session
+    Private slClient As HttpClient = Nothing
 
     ' Disable SSL verification for Service Layer
     Private Sub BypassSSL()
@@ -51,9 +54,10 @@ Module manualrecocom
                     AND P.""InvoicesJson"" IS NOT NULL 
                     AND TO_NVARCHAR(P.""InvoicesJson"") <> '[]'
                 "
+
+                Dim records As New List(Of Object)()
                 Using cmd As New HanaCommand(sql, conn)
                     Using reader As HanaDataReader = cmd.ExecuteReader()
-                        Dim records As New List(Of Object)()
                         While reader.Read()
                             records.Add(New With {
                                 .Id = reader.GetString(0),
@@ -63,45 +67,44 @@ Module manualrecocom
                                 .State = reader.GetString(4)
                             })
                         End While
-
-                        If records.Count = 0 Then
-                            Logger.Log("[" & runId & "] No pending records found. Exiting.")
-                            Return
-                        End If
-
-                        Logger.Log("[" & runId & "] Fetching pending payments... Found " & records.Count)
-
-                        ' Login to Service Layer
-                        Dim slCookies As CookieContainer = SlLogin()
-
-                        For Each rec In records
-                            Logger.Log("[" & runId & "] START Payment | ID=" & rec.Id & " | Vendor=" & rec.VendorCode & " | DocEntry=" & rec.DocEntry & " | State=" & rec.State)
-                            
-                            Try
-                                ReconcilePayment(slCookies, conn, rec.VendorCode, rec.DocEntry, rec.InvoicesJson, runId)
-                                UpdateReconciled(conn, rec.Id, "Y")
-                                Logger.Log("[" & runId & "] SUCCESS Payment ID=" & rec.Id)
-                            Catch ex As Exception
-                                Dim nextState As String = "1"
-                                If rec.State = "1" Then nextState = "2"
-                                If rec.State = "2" Then nextState = "F"
-                                
-                                UpdateReconciled(conn, rec.Id, nextState)
-                                Logger.Log("[" & runId & "] Updated Reconciled state to " & nextState & " for ID=" & rec.Id)
-                                Logger.Log("[" & runId & "] ERROR: FAILED Payment ID=" & rec.Id & " | Error=" & ex.Message)
-                            End Try
-                            
-                            Logger.Log("[" & runId & "] END Payment ID=" & rec.Id)
-                        Next
-
-                        ' Logout of Service Layer
-                        SlLogout(slCookies)
                     End Using
                 End Using
+
+                If records.Count = 0 Then
+                    Logger.Log("[" & runId & "] No pending records found. Exiting.")
+                    Return
+                End If
+
+                Logger.Log("[" & runId & "] Fetching pending payments... Found " & records.Count)
+
+                ' Login to Service Layer
+                SlLogin()
+
+                For Each rec In records
+                    Logger.Log("[" & runId & "] START Payment | ID=" & rec.Id & " | Vendor=" & rec.VendorCode & " | DocEntry=" & rec.DocEntry & " | State=" & rec.State)
+
+                    Try
+                        ReconcilePayment(conn, rec.VendorCode, rec.DocEntry, rec.InvoicesJson, runId)
+                        UpdateReconciled(conn, rec.Id, "Y")
+                        Logger.Log("[" & runId & "] SUCCESS Payment ID=" & rec.Id)
+                    Catch ex As Exception
+                        Dim nextState As String = "1"
+                        If rec.State = "1" Then nextState = "2"
+                        If rec.State = "2" Then nextState = "F"
+
+                        UpdateReconciled(conn, rec.Id, nextState)
+                        Logger.Log("[" & runId & "] Updated Reconciled state to " & nextState & " for ID=" & rec.Id)
+                        Logger.Log("[" & runId & "] ERROR: FAILED Payment ID=" & rec.Id & " | Error=" & ex.Message)
+                    End Try
+
+                    Logger.Log("[" & runId & "] END Payment ID=" & rec.Id)
+                Next
 
             Catch ex As Exception
                 Logger.Log("[" & runId & "] FATAL ERROR: " & ex.Message)
             Finally
+                ' Always logout and close
+                SlLogout()
                 If conn.State = System.Data.ConnectionState.Open Then
                     conn.Close()
                 End If
@@ -110,45 +113,42 @@ Module manualrecocom
         End Using
     End Sub
 
-    Private Function SlLogin() As CookieContainer
-        Dim cookieContainer As New CookieContainer()
+    Private Sub SlLogin()
         Dim handler As New HttpClientHandler()
-        handler.CookieContainer = cookieContainer
         handler.UseCookies = True
         handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
-        
-        Using client As New HttpClient(handler)
-            Dim loginUrl As String = $"{slUrl}/Login"
-            
-            Dim payloadObj As New JObject()
-            payloadObj("CompanyDB") = sapSchema
-            payloadObj("UserName") = slUser
-            payloadObj("Password") = slPass
-            Dim payload As String = JsonConvert.SerializeObject(payloadObj)
-            
-            Dim request As New HttpRequestMessage(HttpMethod.Post, loginUrl)
-            request.Content = New StringContent(payload, Encoding.UTF8, "application/json")
-            request.Headers.ExpectContinue = False
-            
-            Dim response = client.SendAsync(request).Result
-            If response.IsSuccessStatusCode Then
-                Return cookieContainer
-            Else
-                Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
-            End If
-        End Using
-    End Function
 
-    Private Sub SlLogout(cookieContainer As CookieContainer)
-        Dim handler As New HttpClientHandler()
-        handler.CookieContainer = cookieContainer
-        handler.UseCookies = True
-        handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
-        Using client As New HttpClient(handler)
-            Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Logout")
-            request.Headers.ExpectContinue = False
-            Dim dummy = client.SendAsync(request).Result
-        End Using
+        slClient = New HttpClient(handler)
+
+        Dim payloadObj As New JObject()
+        payloadObj("CompanyDB") = sapSchema
+        payloadObj("UserName") = slUser
+        payloadObj("Password") = slPass
+        Dim payload As String = JsonConvert.SerializeObject(payloadObj)
+
+        Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Login")
+        request.Content = New StringContent(payload, Encoding.UTF8, "application/json")
+        request.Headers.ExpectContinue = False
+
+        Dim response = slClient.SendAsync(request).Result
+        If Not response.IsSuccessStatusCode Then
+            Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
+        End If
+    End Sub
+
+    Private Sub SlLogout()
+        If slClient IsNot Nothing Then
+            Try
+                Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Logout")
+                request.Headers.ExpectContinue = False
+                Dim dummy = slClient.SendAsync(request).Result
+            Catch
+                ' Ignore logout errors
+            Finally
+                slClient.Dispose()
+                slClient = Nothing
+            End Try
+        End If
     End Sub
 
     Private Sub UpdateReconciled(conn As HanaConnection, id As String, state As String)
@@ -202,20 +202,20 @@ Module manualrecocom
         Throw New Exception($"Invoice JE line not found | TransId={invTransId} | BP={vendorCode}")
     End Function
 
-    Private Sub ReconcilePayment(cookies As CookieContainer, conn As HanaConnection, vendor As String, paymentDocEntry As Integer, invoicesJson As String, runId As String)
-        
+    Private Sub ReconcilePayment(conn As HanaConnection, vendor As String, paymentDocEntry As Integer, invoicesJson As String, runId As String)
+
         ' 1. Get Payment JE Line Details
         Dim payInfo = GetPaymentJEInfo(conn, paymentDocEntry, vendor)
         Dim payTransId As Integer = payInfo.Item1
         Dim payLineId As Integer = payInfo.Item2
         Logger.Log("[" & runId & "] Payment JE | TransId=" & payTransId & " | LineId=" & payLineId)
 
-        ' 2. Initialize Service Layer DI-API wrapper payload
+        ' 2. Initialize reconciliation payload
         Dim payloadObj As New JObject()
         Dim internalReconObj As New JObject()
         internalReconObj("CardOrAccount") = "coaCard"
         Dim rowsArray As New JArray()
-        
+
         Dim totalAmount As Double = 0.0
         Dim invoices As JArray = JArray.Parse(invoicesJson)
 
@@ -223,12 +223,12 @@ Module manualrecocom
         For Each inv In invoices
             Dim invTransId As Integer = CInt(inv("InvoiceNumber"))
             Dim amount As Double = CDbl(inv("Amount"))
-            
+
             Dim invInfo = GetInvoiceJEInfo(conn, invTransId, vendor)
             Dim invLineId As Integer = invInfo.Item1
-            
+
             Logger.Log("[" & runId & "] Invoice | TransId=" & invTransId & " | LineId=" & invLineId & " | ReconAmount=" & amount)
-            
+
             Dim invRow As New JObject()
             invRow("Selected") = "tYES"
             invRow("ShortName") = vendor
@@ -236,12 +236,12 @@ Module manualrecocom
             invRow("TransRowId") = invLineId
             invRow("ReconcileAmount") = Math.Abs(amount)
             rowsArray.Add(invRow)
-            
+
             totalAmount += Math.Abs(amount)
         Next
-        
+
         Logger.Log("[" & runId & "] Total Invoice Amount = " & totalAmount)
-        
+
         ' 4. Add the Payment Row to balance it exactly
         Dim payRow As New JObject()
         payRow("Selected") = "tYES"
@@ -250,31 +250,24 @@ Module manualrecocom
         payRow("TransRowId") = payLineId
         payRow("ReconcileAmount") = totalAmount
         rowsArray.Add(payRow)
-        
+
         ' 5. Wrap everything inside InternalReconciliationOpenTrans
         internalReconObj("InternalReconciliationOpenTransRows") = rowsArray
         payloadObj("InternalReconciliationOpenTrans") = internalReconObj
         Dim payloadStr As String = JsonConvert.SerializeObject(payloadObj)
-        
-        ' 6. Post to the Hidden Service Layer Action Endpoint
+
+        ' 6. Post to Service Layer
         Logger.Log("[" & runId & "] Posting reconciliation to Service Layer...")
-        Dim handler As New HttpClientHandler()
-        handler.CookieContainer = cookies
-        handler.UseCookies = True
-        handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
-        Using client As New HttpClient(handler)
-            Dim url As String = $"{slUrl}/InternalReconciliationsService_Add"
-            Dim request As New HttpRequestMessage(HttpMethod.Post, url)
-            request.Content = New StringContent(payloadStr, Encoding.UTF8, "application/json")
-            request.Headers.ExpectContinue = False
-            
-            Dim response = client.SendAsync(request).Result
-            If response.IsSuccessStatusCode OrElse response.StatusCode = HttpStatusCode.Created OrElse response.StatusCode = HttpStatusCode.NoContent Then
-                Logger.Log("[" & runId & "] Reconciliation DONE | PaymentDocEntry=" & paymentDocEntry)
-            Else
-                Throw New Exception($"Service Layer Error: {response.Content.ReadAsStringAsync().Result}")
-            End If
-        End Using
+        Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/InternalReconciliationsService_Add")
+        request.Content = New StringContent(payloadStr, Encoding.UTF8, "application/json")
+        request.Headers.ExpectContinue = False
+
+        Dim response = slClient.SendAsync(request).Result
+        If response.IsSuccessStatusCode OrElse response.StatusCode = HttpStatusCode.Created OrElse response.StatusCode = HttpStatusCode.NoContent Then
+            Logger.Log("[" & runId & "] Reconciliation DONE | PaymentDocEntry=" & paymentDocEntry)
+        Else
+            Throw New Exception($"Service Layer Error: {response.Content.ReadAsStringAsync().Result}")
+        End If
     End Sub
 
     Public Sub RunManualReco()

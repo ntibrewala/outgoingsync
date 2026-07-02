@@ -17,51 +17,51 @@ Module OutgoingPaymentSync
     Dim slUser As String = "manager"
     Dim slPass As String = "bppl@123"
 
+    ' Single shared HttpClient for the entire SL session
+    Private slClient As HttpClient = Nothing
+
     Private Sub BypassSSL()
         ServicePointManager.ServerCertificateValidationCallback = Function(s, cert, chain, sslPolicyErrors) True
         ServicePointManager.Expect100Continue = False
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 Or SecurityProtocolType.Tls11 Or SecurityProtocolType.Tls
     End Sub
 
-    Private Function SlLogin() As CookieContainer
-        Dim cookieContainer As New CookieContainer()
+    Private Sub SlLogin()
         Dim handler As New HttpClientHandler()
-        handler.CookieContainer = cookieContainer
         handler.UseCookies = True
         handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
-        
-        Using client As New HttpClient(handler)
-            Dim loginUrl As String = $"{slUrl}/Login"
-            
-            Dim payloadObj As New JObject()
-            payloadObj("CompanyDB") = sapSchema
-            payloadObj("UserName") = slUser
-            payloadObj("Password") = slPass
-            Dim payload As String = JsonConvert.SerializeObject(payloadObj)
-            
-            Dim request As New HttpRequestMessage(HttpMethod.Post, loginUrl)
-            request.Content = New StringContent(payload, Encoding.UTF8, "application/json")
-            request.Headers.ExpectContinue = False
-            
-            Dim response = client.SendAsync(request).Result
-            If response.IsSuccessStatusCode Then
-                Return cookieContainer
-            Else
-                Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
-            End If
-        End Using
-    End Function
 
-    Private Sub SlLogout(cookieContainer As CookieContainer)
-        Dim handler As New HttpClientHandler()
-        handler.CookieContainer = cookieContainer
-        handler.UseCookies = True
-        handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
-        Using client As New HttpClient(handler)
-            Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Logout")
-            request.Headers.ExpectContinue = False
-            Dim dummy = client.SendAsync(request).Result
-        End Using
+        slClient = New HttpClient(handler)
+
+        Dim payloadObj As New JObject()
+        payloadObj("CompanyDB") = sapSchema
+        payloadObj("UserName") = slUser
+        payloadObj("Password") = slPass
+        Dim payload As String = JsonConvert.SerializeObject(payloadObj)
+
+        Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Login")
+        request.Content = New StringContent(payload, Encoding.UTF8, "application/json")
+        request.Headers.ExpectContinue = False
+
+        Dim response = slClient.SendAsync(request).Result
+        If Not response.IsSuccessStatusCode Then
+            Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
+        End If
+    End Sub
+
+    Private Sub SlLogout()
+        If slClient IsNot Nothing Then
+            Try
+                Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Logout")
+                request.Headers.ExpectContinue = False
+                Dim dummy = slClient.SendAsync(request).Result
+            Catch
+                ' Ignore logout errors
+            Finally
+                slClient.Dispose()
+                slClient = Nothing
+            End Try
+        End If
     End Sub
 
     '============================================================
@@ -106,12 +106,10 @@ Module OutgoingPaymentSync
                 ' SAP CONNECT (Service Layer)
                 '=========================
                 BypassSSL()
-                Dim slCookies As CookieContainer = SlLogin()
+                SlLogin()
                 Logger.Log("[" & runId & "] SAP Service Layer Connected")
 
-                ProcessCompletedPayments(conn, slCookies, runId)
-                
-                SlLogout(slCookies)
+                ProcessCompletedPayments(conn, runId)
 
             End Using
 
@@ -119,6 +117,7 @@ Module OutgoingPaymentSync
             Logger.Log("[" & runId & "] FATAL: " & ex.ToString())
 
         Finally
+            SlLogout()
             Logger.Log("========== [END] RunId=" & runId & " ==========")
             Logger.EndSession()
         End Try
@@ -142,7 +141,7 @@ Module OutgoingPaymentSync
     End Function
 
     '============================================================
-    Sub ProcessCompletedPayments(conn As HanaConnection, slCookies As CookieContainer, runId As String)
+    Sub ProcessCompletedPayments(conn As HanaConnection, runId As String)
 
         Logger.Log("[" & runId & "] Fetching completed payments")
 
@@ -163,7 +162,7 @@ Module OutgoingPaymentSync
                     Logger.Log($"[{runId}] Processing ID={id} | Date={txnDate:yyyy-MM-dd}")
 
                     Try
-                        Dim paymentDocEntry As Integer = CreateOutgoingPayment(vendor, amount, txnDate, conn, slCookies)
+                        Dim paymentDocEntry As Integer = CreateOutgoingPayment(vendor, amount, txnDate, conn)
 
                         UpdatePaymentProcessed(id, paymentDocEntry, conn)
 
@@ -201,9 +200,9 @@ Module OutgoingPaymentSync
     End Function
 
     '============================================================
-    Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date, conn As HanaConnection, slCookies As CookieContainer) As Integer
+    Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date, conn As HanaConnection) As Integer
 
-        ' Determine CardType from HANA directly instead of DI API
+        ' Determine CardType from HANA
         Dim cardType As String = ""
         Using cmd As New HanaCommand($"SELECT ""CardType"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""=?", conn)
             cmd.Parameters.AddWithValue("p_vendor", vendor)
@@ -225,9 +224,9 @@ Module OutgoingPaymentSync
             payloadObj("CardCode") = vendor
             payloadObj("DocType") = If(cardType = "S", "rSupplier", "rCustomer")
         Else
-            ' It's a G/L Account! We completely bypass Journal Entries using rAccount doc type
+            ' G/L Account payment
             payloadObj("DocType") = "rAccount"
-            
+
             Dim controlAcct As String = "210001"
             Using cmd As New HanaCommand($"SELECT ""DebPayAcct"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""=?", conn)
                 cmd.Parameters.AddWithValue("p_vendor", vendor)
@@ -242,30 +241,23 @@ Module OutgoingPaymentSync
             acctRow("SumPaid") = amount
             acctRow("Decription") = "DBS Bank Payment - " & vendor
             accountArray.Add(acctRow)
-            
+
             payloadObj("PaymentAccounts") = accountArray
         End If
 
         Dim payloadStr As String = JsonConvert.SerializeObject(payloadObj)
-        
-        Dim handler As New HttpClientHandler()
-        handler.CookieContainer = slCookies
-        handler.UseCookies = True
-        handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
-        Using client As New HttpClient(handler)
-            Dim url As String = $"{slUrl}/VendorPayments"
-            Dim request As New HttpRequestMessage(HttpMethod.Post, url)
-            request.Content = New StringContent(payloadStr, Encoding.UTF8, "application/json")
-            request.Headers.ExpectContinue = False
-            
-            Dim response = client.SendAsync(request).Result
-            If response.IsSuccessStatusCode OrElse response.StatusCode = HttpStatusCode.Created Then
-                Dim jsonResp As JObject = JObject.Parse(response.Content.ReadAsStringAsync().Result)
-                Return Convert.ToInt32(jsonResp("DocEntry"))
-            Else
-                Throw New Exception("Service Layer Error: " & response.Content.ReadAsStringAsync().Result)
-            End If
-        End Using
+
+        Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/VendorPayments")
+        request.Content = New StringContent(payloadStr, Encoding.UTF8, "application/json")
+        request.Headers.ExpectContinue = False
+
+        Dim response = slClient.SendAsync(request).Result
+        If response.IsSuccessStatusCode OrElse response.StatusCode = HttpStatusCode.Created Then
+            Dim jsonResp As JObject = JObject.Parse(response.Content.ReadAsStringAsync().Result)
+            Return Convert.ToInt32(jsonResp("DocEntry"))
+        Else
+            Throw New Exception("Service Layer Error: " & response.Content.ReadAsStringAsync().Result)
+        End If
 
     End Function
 
@@ -300,7 +292,7 @@ Module OutgoingPaymentSync
         End Using
 
     End Sub
-    
+
     Public Sub RunOutgoing()
         Main()
     End Sub
