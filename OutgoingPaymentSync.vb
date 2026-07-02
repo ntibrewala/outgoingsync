@@ -31,6 +31,7 @@ Module OutgoingPaymentSync
             payloadObj("UserName") = slUser
             payloadObj("Password") = slPass
             Dim payload As String = JsonConvert.SerializeObject(payloadObj)
+            Console.WriteLine("SL PAYLOAD: " & payload)
             
             Dim content As New StringContent(payload, Encoding.UTF8, "application/json")
             
