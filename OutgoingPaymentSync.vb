@@ -1,5 +1,10 @@
-﻿Imports Sap.Data.Hana
-Imports SAPbobsCOM
+Imports System
+Imports System.Net
+Imports System.Net.Http
+Imports System.Text
+Imports Newtonsoft.Json
+Imports Newtonsoft.Json.Linq
+Imports Sap.Data.Hana
 Imports Bhavya.SAP.Core
 
 Module OutgoingPaymentSync
@@ -7,7 +12,38 @@ Module OutgoingPaymentSync
     Dim sapSchema As String = "BHAVYA_POLYFILMS_01"
     Dim DBSBankGLAccount As String = "230002"
 
-    Dim oCompany As Company
+    ' Service Layer Config
+    Dim slUrl As String = "https://10.10.0.113:50000/b1s/v1"
+    Dim slUser As String = "manager"
+    Dim slPass As String = "bppl@123"
+
+    Private Sub BypassSSL()
+        ServicePointManager.ServerCertificateValidationCallback = Function(s, cert, chain, sslPolicyErrors) True
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 Or SecurityProtocolType.Tls11 Or SecurityProtocolType.Tls
+    End Sub
+
+    Private Function SlLogin() As String
+        Using client As New HttpClient()
+            Dim loginUrl As String = $"{slUrl}/Login"
+            Dim payload As String = $"{{""CompanyDB"": ""{sapSchema}"", ""UserName"": ""{slUser}"", ""Password"": ""{slPass}""}}"
+            Dim content As New StringContent(payload, Encoding.UTF8, "application/json")
+            
+            Dim response = client.PostAsync(loginUrl, content).Result
+            If response.IsSuccessStatusCode Then
+                Dim cookies = response.Headers.GetValues("Set-Cookie")
+                Return String.Join(";", cookies)
+            Else
+                Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
+            End If
+        End Using
+    End Function
+
+    Private Sub SlLogout(cookies As String)
+        Using client As New HttpClient()
+            client.DefaultRequestHeaders.Add("Cookie", cookies)
+            Dim _ = client.PostAsync($"{slUrl}/Logout", Nothing).Result
+        End Using
+    End Sub
 
     '============================================================
     Sub Main()
@@ -48,12 +84,15 @@ Module OutgoingPaymentSync
                 End If
 
                 '=========================
-                ' SAP CONNECT
+                ' SAP CONNECT (Service Layer)
                 '=========================
-                oCompany = SapCompanyManager.Connect(sapSchema)
-                Logger.Log("[" & runId & "] SAP Connected")
+                BypassSSL()
+                Dim slCookies As String = SlLogin()
+                Logger.Log("[" & runId & "] SAP Service Layer Connected")
 
-                ProcessCompletedPayments(conn, runId)
+                ProcessCompletedPayments(conn, slCookies, runId)
+                
+                SlLogout(slCookies)
 
             End Using
 
@@ -61,7 +100,6 @@ Module OutgoingPaymentSync
             Logger.Log("[" & runId & "] FATAL: " & ex.ToString())
 
         Finally
-            SapCompanyManager.Disconnect(oCompany)
             Logger.Log("========== [END] RunId=" & runId & " ==========")
             Logger.EndSession()
         End Try
@@ -85,12 +123,11 @@ Module OutgoingPaymentSync
     End Function
 
     '============================================================
-    Sub ProcessCompletedPayments(conn As HanaConnection, runId As String)
+    Sub ProcessCompletedPayments(conn As HanaConnection, slCookies As String, runId As String)
 
         Logger.Log("[" & runId & "] Fetching completed payments")
 
-        Using cmd As New HanaCommand(
-        "CALL ""DBS_BANK"".""BHV_GET_COMPLETED_PAYMENTS""()", conn)
+        Using cmd As New HanaCommand("CALL ""DBS_BANK"".""BHV_GET_COMPLETED_PAYMENTS""()", conn)
 
             Using reader = cmd.ExecuteReader()
 
@@ -107,18 +144,15 @@ Module OutgoingPaymentSync
                     Logger.Log($"[{runId}] Processing ID={id} | Date={txnDate:yyyy-MM-dd}")
 
                     Try
-                        Dim paymentDocEntry As Integer = CreateOutgoingPayment(vendor, amount, txnDate)
+                        Dim paymentDocEntry As Integer = CreateOutgoingPayment(vendor, amount, txnDate, conn, slCookies)
 
                         UpdatePaymentProcessed(id, paymentDocEntry, conn)
 
                         Logger.Log($"[{runId}] SUCCESS | ID={id} | DocEntry={paymentDocEntry}")
 
                     Catch ex As Exception
-
                         UpdatePaymentError(id, ex.Message, conn)
-
                         Logger.Log($"[{runId}] ERROR | ID={id} | {ex.Message}")
-
                     End Try
 
                 End While
@@ -135,7 +169,6 @@ Module OutgoingPaymentSync
         "SELECT ""ApprovedAt"" FROM ""DBS_BANK"".""PENDING_PAYMENTS"" WHERE ""Id""=?", conn)
 
             cmd.Parameters.AddWithValue("p1", id)
-
             Dim result = cmd.ExecuteScalar()
 
             If result IsNot Nothing Then
@@ -149,87 +182,82 @@ Module OutgoingPaymentSync
     End Function
 
     '============================================================
-    Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date) As Integer
+    Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date, conn As HanaConnection, slCookies As String) As Integer
 
-        Dim oRS As Recordset = oCompany.GetBusinessObject(BoObjectTypes.BoRecordset)
-        oRS.DoQuery($"SELECT ""CardType"" FROM ""OCRD"" WHERE ""CardCode""='{vendor}'")
+        ' Determine CardType from HANA directly instead of DI API
+        Dim cardType As String = ""
+        Using cmd As New HanaCommand($"SELECT ""CardType"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""='{vendor}'", conn)
+            Using reader = cmd.ExecuteReader()
+                If reader.Read() Then
+                    cardType = reader("CardType").ToString()
+                End If
+            End Using
+        End Using
 
-        Dim cardType As String = If(Not oRS.EoF, oRS.Fields.Item("CardType").Value.ToString(), "")
+        Dim payloadObj As New JObject()
+        payloadObj("TransferAccount") = DBSBankGLAccount
+        payloadObj("TransferSum") = amount
+        payloadObj("TransferDate") = txnDate.ToString("yyyy-MM-dd")
+        payloadObj("DocDate") = txnDate.ToString("yyyy-MM-dd")
+        payloadObj("Remarks") = "DBS Payment - " & vendor
 
         If cardType = "S" OrElse cardType = "C" Then
-
-            Dim oPayment As Payments = oCompany.GetBusinessObject(BoObjectTypes.oVendorPayments)
-
-            oPayment.CardCode = vendor
-            oPayment.DocDate = txnDate
-            oPayment.DocType = If(cardType = "S", BoRcptTypes.rSupplier, BoRcptTypes.rCustomer)
-            oPayment.TransferAccount = DBSBankGLAccount
-            oPayment.TransferSum = amount
-            oPayment.TransferDate = txnDate
-            oPayment.Remarks = "DBS Payment - " & vendor
-
-            If oPayment.Add() <> 0 Then ThrowSapError()
-
+            payloadObj("CardCode") = vendor
+            payloadObj("DocType") = If(cardType = "S", "rSupplier", "rCustomer")
         Else
-
+            ' It's a G/L Account! We completely bypass Journal Entries using rAccount doc type
+            payloadObj("DocType") = "rAccount"
+            
             Dim controlAcct As String = "210001"
+            Using cmd As New HanaCommand($"SELECT ""DebPayAcct"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""='{vendor}'", conn)
+                Using reader = cmd.ExecuteReader()
+                    If reader.Read() Then controlAcct = reader("DebPayAcct").ToString()
+                End Using
+            End Using
 
-            oRS.DoQuery($"SELECT ""DebPayAcct"" FROM ""OCRD"" WHERE ""CardCode""='{vendor}'")
-            If Not oRS.EoF Then controlAcct = oRS.Fields.Item("DebPayAcct").Value.ToString()
-
-            Dim oJE As JournalEntries = oCompany.GetBusinessObject(BoObjectTypes.oJournalEntries)
-
-            oJE.ReferenceDate = txnDate
-            oJE.DueDate = txnDate
-            oJE.Memo = "DBS Bank Payment - " & vendor
-
-            oJE.Lines.AccountCode = controlAcct
-            oJE.Lines.ShortName = vendor
-            oJE.Lines.Debit = amount
-            oJE.Lines.Add()
-
-            oJE.Lines.AccountCode = DBSBankGLAccount
-            oJE.Lines.ShortName = DBSBankGLAccount
-            oJE.Lines.Credit = amount
-
-            If oJE.Add() <> 0 Then ThrowSapError()
-
+            Dim accountArray As New JArray()
+            Dim acctRow As New JObject()
+            acctRow("AccountCode") = controlAcct
+            acctRow("SumPaid") = amount
+            acctRow("Decription") = "DBS Bank Payment - " & vendor
+            accountArray.Add(acctRow)
+            
+            payloadObj("PaymentAccounts") = accountArray
         End If
 
-        Dim docEntry As String = ""
-        oCompany.GetNewObjectCode(docEntry)
-
-        Return Convert.ToInt32(docEntry)
+        Dim payloadStr As String = JsonConvert.SerializeObject(payloadObj)
+        
+        Using client As New HttpClient()
+            client.DefaultRequestHeaders.Add("Cookie", slCookies)
+            Dim url As String = $"{slUrl}/VendorPayments"
+            Dim content As New StringContent(payloadStr, Encoding.UTF8, "application/json")
+            
+            Dim response = client.PostAsync(url, content).Result
+            If response.IsSuccessStatusCode OrElse response.StatusCode = HttpStatusCode.Created Then
+                Dim jsonResp As JObject = JObject.Parse(response.Content.ReadAsStringAsync().Result)
+                Return Convert.ToInt32(jsonResp("DocEntry"))
+            Else
+                Throw New Exception("Service Layer Error: " & response.Content.ReadAsStringAsync().Result)
+            End If
+        End Using
 
     End Function
-
-    '============================================================
-    Sub ThrowSapError()
-        Dim errCode As Integer = 0
-        Dim errMsg As String = ""
-        oCompany.GetLastError(errCode, errMsg)
-        Throw New Exception(errCode & " - " & errMsg)
-    End Sub
 
     '============================================================
     Sub UpdatePaymentProcessed(id As String, docEntry As Integer, conn As HanaConnection)
 
         Using cmd As New HanaCommand(
             "CALL ""DBS_BANK"".""BHV_MARK_PAYMENT_PROCESSED""(?,?)", conn)
-
             cmd.Parameters.AddWithValue("p_id", id)
             cmd.Parameters.AddWithValue("p_docnum", docEntry)
             cmd.ExecuteNonQuery()
-
         End Using
 
-        ' 🔥 Clear error
+        ' Clear error
         Using cmd2 As New HanaCommand(
             "UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""ErrorDescription""='' WHERE ""Id""=?", conn)
-
             cmd2.Parameters.AddWithValue("p_id", id)
             cmd2.ExecuteNonQuery()
-
         End Using
 
     End Sub
@@ -240,14 +268,13 @@ Module OutgoingPaymentSync
 
         Using cmd As New HanaCommand(
             "UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""ErrorDescription""=? WHERE ""Id""=?", conn)
-
             cmd.Parameters.AddWithValue("p_error", safeError)
             cmd.Parameters.AddWithValue("p_id", id)
             cmd.ExecuteNonQuery()
-
         End Using
 
     End Sub
+    
     Public Sub RunOutgoing()
         Main()
     End Sub

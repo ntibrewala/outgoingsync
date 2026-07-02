@@ -1,258 +1,254 @@
-﻿Imports Sap.Data.Hana
-Imports SAPbobsCOM
+Imports System
+Imports System.Net
+Imports System.Net.Http
+Imports System.Text
+Imports Sap.Data.Hana
+Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
 Imports Bhavya.SAP.Core
 
 Module manualrecocom
 
     Dim sapSchema As String = "BHAVYA_POLYFILMS_01"
-    Dim controlAccount As String = "210001"
-    Dim DBSBankGLAccount As String = "230002"
+    
+    ' HANA DB Config
+    Dim hanaHost As String = "10.10.0.113"
+    Dim hanaPort As String = "30015"
+    Dim hanaUser As String = "SYSTEM"
+    Dim hanaPass As String = "B1sap#2025"
 
-    Dim oCompany As SAPbobsCOM.Company
+    ' Service Layer Config
+    Dim slUrl As String = "https://10.10.0.113:50000/b1s/v1"
+    Dim slUser As String = "manager"
+    Dim slPass As String = "bppl@123"
+
+    ' Disable SSL verification for Service Layer
+    Private Sub BypassSSL()
+        ServicePointManager.ServerCertificateValidationCallback = Function(s, cert, chain, sslPolicyErrors) True
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 Or SecurityProtocolType.Tls11 Or SecurityProtocolType.Tls
+    End Sub
 
     Sub Main()
-
+        BypassSSL()
         Dim runId As String = Guid.NewGuid().ToString()
-
-        Logger.StartSession()
         Logger.Log("========== [ManualReco START] RunId=" & runId & " ==========")
 
-        Try
-            Dim hasRecords As Boolean = False
-
-            Using roConn = HanaConnectionManager.GetConnection(sapSchema, HanaConnectionManager.HanaConnectionMode.ReadOnlyMode)
-                roConn.Open()
-                Logger.Log("[" & runId & "] Connected to HANA (ReadOnly)")
-
-                hasRecords = HasUnreconciledPayments(roConn)
-                Logger.Log("[" & runId & "] HasUnreconciledPayments = " & hasRecords)
-            End Using
-
-            If Not hasRecords Then
-                Logger.Log("[" & runId & "] No records found. Exiting.")
-                Exit Sub
-            End If
-
-            Logger.Log("[" & runId & "] Connecting to SAP DI API...")
-            oCompany = SapCompanyManager.Connect(sapSchema)
-            Logger.Log("[" & runId & "] SAP Connected")
-
-            Using conn = HanaConnectionManager.GetConnection(sapSchema, HanaConnectionManager.HanaConnectionMode.ReadWriteMode)
+        Dim connString As String = $"Server={hanaHost}:{hanaPort};UserID={hanaUser};Password={hanaPass}"
+        Using conn As New HanaConnection(connString)
+            Try
                 conn.Open()
-                Logger.Log("[" & runId & "] Connected to HANA (ReadWrite)")
+                Logger.Log("[" & runId & "] Connected to HANA")
 
-                ProcessUnreconciledPayments(conn, runId)
-            End Using
-
-        Catch ex As Exception
-            Logger.Log("[" & runId & "] ERROR: FATAL ERROR: " & ex.ToString())
-        Finally
-            Logger.Log("[" & runId & "] Disconnecting SAP...")
-            SapCompanyManager.Disconnect(oCompany)
-
-            Logger.Log("========== [ManualReco END] RunId=" & runId & " ==========")
-            Logger.EndSession()
-        End Try
-
-    End Sub
-
-    Sub ProcessUnreconciledPayments(conn As HanaConnection, runId As String)
-
-        Logger.Log("[" & runId & "] Fetching pending payments...")
-
-        Dim sql As String =
-        "SELECT P.""Id"", P.""VendorCode"", P.""DocNum"" AS PaymentDocEntry, " &
-        "TO_NVARCHAR(P.""InvoicesJson"") AS InvoicesJson, " &
-        "IFNULL(P.""Reconciled"",'N') AS ReconState " &
-        "FROM ""DBS_BANK"".""PENDING_PAYMENTS"" P " &
-        "WHERE P.""Processed"" = 'Y' " &
-        "AND IFNULL(P.""Reconciled"",'N') IN ('N','1','2') " &
-        "AND P.""InvoicesJson"" IS NOT NULL " &
-        "AND TO_NVARCHAR(P.""InvoicesJson"") <> '[]'"
-
-        Using cmd As New HanaCommand(sql, conn)
-            Using reader = cmd.ExecuteReader()
-
+                ' Fetch pending payments queue from Bank DB
+                Dim sql As String = $"
+                    SELECT P.""Id"", P.""VendorCode"", P.""DocNum"" AS ""PaymentDocEntry"", 
+                           TO_NVARCHAR(P.""InvoicesJson"") AS ""InvoicesJson"", 
+                           IFNULL(P.""Reconciled"",'N') AS ""ReconState"" 
+                    FROM ""DBS_BANK"".""PENDING_PAYMENTS"" P 
+                    WHERE P.""Processed"" = 'Y' 
+                    AND IFNULL(P.""Reconciled"",'N') IN ('N','1','2') 
+                    AND P.""InvoicesJson"" IS NOT NULL 
+                    AND TO_NVARCHAR(P.""InvoicesJson"") <> '[]'
+                "
+                Dim cmd As New HanaCommand(sql, conn)
+                Dim reader As HanaDataReader = cmd.ExecuteReader()
+                
+                Dim records As New List(Of Object)()
                 While reader.Read()
-
-                    Dim id = reader("Id").ToString()
-                    Dim vendor = reader("VendorCode").ToString()
-                    Dim paymentDocEntry = Convert.ToInt32(reader("PaymentDocEntry"))
-                    Dim json = reader("InvoicesJson").ToString()
-                    Dim state = reader("ReconState").ToString()
-
-                    Logger.Log("[" & runId & "] START Payment | ID=" & id & " | Vendor=" & vendor & " | DocEntry=" & paymentDocEntry & " | State=" & state)
-                    Logger.Log("[" & runId & "] JSON = " & json)
-
-                    Try
-                        ReconcilePaymentUsingDIAPI(vendor, paymentDocEntry, json, conn, runId)
-
-                        UpdateReconciled(id, "Y", conn)
-                        Logger.Log("[" & runId & "] SUCCESS Payment ID=" & id)
-
-                    Catch ex As Exception
-
-                        Dim nextState As String = "1"
-                        If state = "1" Then nextState = "2"
-                        If state = "2" Then nextState = "F"
-
-                        UpdateReconciled(id, nextState, conn)
-                        Logger.Log("[" & runId & "] Updated Reconciled state to " & nextState & " for ID=" & id)
-                        Logger.Log("[" & runId & "] ERROR: FAILED Payment ID=" & id & " | NextState=" & nextState & " | Error=" & ex.ToString())
-
-                    End Try
-
-                    Logger.Log("[" & runId & "] END Payment ID=" & id)
-
+                    records.Add(New With {
+                        .Id = reader.GetString(0),
+                        .VendorCode = reader.GetString(1),
+                        .DocEntry = reader.GetInt32(2),
+                        .InvoicesJson = reader.GetString(3),
+                        .State = reader.GetString(4)
+                    })
                 End While
+                reader.Close()
 
-            End Using
+                If records.Count = 0 Then
+                    Logger.Log("[" & runId & "] No pending records found. Exiting.")
+                    Return
+                End If
+
+                Logger.Log("[" & runId & "] Fetching pending payments... Found " & records.Count)
+
+                ' Login to Service Layer
+                Dim slCookies As String = SlLogin()
+
+                For Each rec In records
+                    Logger.Log("[" & runId & "] START Payment | ID=" & rec.Id & " | Vendor=" & rec.VendorCode & " | DocEntry=" & rec.DocEntry & " | State=" & rec.State)
+                    
+                    Try
+                        ReconcilePayment(slCookies, conn, rec.VendorCode, rec.DocEntry, rec.InvoicesJson, runId)
+                        UpdateReconciled(conn, rec.Id, "Y")
+                        Logger.Log("[" & runId & "] SUCCESS Payment ID=" & rec.Id)
+                    Catch ex As Exception
+                        Dim nextState As String = "1"
+                        If rec.State = "1" Then nextState = "2"
+                        If rec.State = "2" Then nextState = "F"
+                        
+                        UpdateReconciled(conn, rec.Id, nextState)
+                        Logger.Log("[" & runId & "] Updated Reconciled state to " & nextState & " for ID=" & rec.Id)
+                        Logger.Log("[" & runId & "] ERROR: FAILED Payment ID=" & rec.Id & " | Error=" & ex.Message)
+                    End Try
+                    
+                    Logger.Log("[" & runId & "] END Payment ID=" & rec.Id)
+                Next
+
+                ' Logout of Service Layer
+                SlLogout(slCookies)
+
+            Catch ex As Exception
+                Logger.Log("[" & runId & "] FATAL ERROR: " & ex.Message)
+            Finally
+                If conn.State = System.Data.ConnectionState.Open Then
+                    conn.Close()
+                End If
+                Logger.Log("========== [ManualReco END] RunId=" & runId & " ==========")
+            End Try
         End Using
-
     End Sub
 
-    Sub ReconcilePaymentUsingDIAPI(vendor As String, paymentDocEntry As Integer, invoiceJson As String, conn As HanaConnection, runId As String)
-
-        Logger.Log("[" & runId & "] Reconciliation START | PaymentDocEntry=" & paymentDocEntry)
-
-        Dim arr = JArray.Parse(invoiceJson)
-
-        Dim paymentTransId As Integer = 0
-        Dim paymentLineId As Integer = 0
-
-        GetPaymentJEInfo(paymentDocEntry, paymentTransId, paymentLineId, conn, runId)
-
-        Logger.Log("[" & runId & "] Payment JE | TransId=" & paymentTransId & " | LineId=" & paymentLineId)
-
-        Dim oCmpSrv = oCompany.GetCompanyService()
-        Dim oReconSrv = oCmpSrv.GetBusinessService(ServiceTypes.InternalReconciliationsService)
-
-        Dim oRecon = oReconSrv.GetDataInterface(
-        InternalReconciliationsServiceDataInterfaces.irsInternalReconciliationOpenTrans)
-
-        oRecon.ReconDate = DateTime.Now
-        oRecon.CardOrAccount = CardOrAccountEnum.coaCard
-
-        Dim total As Double = 0
-
-        For Each item In arr
-
-            Dim invTransId = CInt(item("InvoiceNumber"))
-
-            Dim docEntry As Integer = 0
-            Dim lineId As Integer = 0
-            Dim amount As Double = 0
-
-            GetInvoiceJEInfo(invTransId, docEntry, lineId, amount, conn, runId)
-
-            Logger.Log("[" & runId & "] Invoice | TransId=" & invTransId & " | LineId=" & lineId & " | Amount=" & amount)
-
-            Dim row = oRecon.InternalReconciliationOpenTransRows.Add()
-            row.Selected = BoYesNoEnum.tYES
-            row.TransId = invTransId
-            row.TransRowId = lineId
-            row.ReconcileAmount = amount
-
-            total += amount
-
-        Next
-
-        Logger.Log("[" & runId & "] Total Invoice Amount = " & total)
-
-        Dim payRow = oRecon.InternalReconciliationOpenTransRows.Add()
-        payRow.Selected = BoYesNoEnum.tYES
-        payRow.TransId = paymentTransId
-        payRow.TransRowId = paymentLineId
-        payRow.ReconcileAmount = total
-
-        Logger.Log("[" & runId & "] Posting reconciliation...")
-
-        oReconSrv.Add(oRecon)
-
-        Logger.Log("[" & runId & "] Reconciliation DONE | PaymentDocEntry=" & paymentDocEntry)
-
-    End Sub
-
-    Sub UpdateReconciled(id As String, state As String, conn As HanaConnection)
-
-        Using cmd As New HanaCommand(
-        "UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""Reconciled""=? WHERE ""Id""=?", conn)
-
-            cmd.Parameters.AddWithValue("p_state", state)
-            cmd.Parameters.AddWithValue("p_id", id)
-            cmd.ExecuteNonQuery()
-
+    Private Function SlLogin() As String
+        Using client As New HttpClient()
+            Dim loginUrl As String = $"{slUrl}/Login"
+            Dim payload As String = $"{{""CompanyDB"": ""{sapSchema}"", ""UserName"": ""{slUser}"", ""Password"": ""{slPass}""}}"
+            Dim content As New StringContent(payload, Encoding.UTF8, "application/json")
+            
+            Dim response = client.PostAsync(loginUrl, content).Result
+            If response.IsSuccessStatusCode Then
+                Dim cookies = response.Headers.GetValues("Set-Cookie")
+                Return String.Join(";", cookies)
+            Else
+                Throw New Exception("Service Layer Login failed: " & response.Content.ReadAsStringAsync().Result)
+            End If
         End Using
-
-    End Sub
-
-    Function HasUnreconciledPayments(conn As HanaConnection) As Boolean
-
-        Using cmd As New HanaCommand(
-        "SELECT 1 FROM ""DBS_BANK"".""PENDING_PAYMENTS"" " &
-        "WHERE ""Processed""='Y' AND IFNULL(""Reconciled"",'N') IN ('N','1','2') LIMIT 1", conn)
-
-            Return cmd.ExecuteScalar() IsNot Nothing
-
-        End Using
-
     End Function
 
-    Private Sub GetInvoiceJEInfo(invTransId As Integer,
-                            ByRef docEntry As Integer,
-                            ByRef lineId As Integer,
-                            ByRef actualAmount As Double,
-                            conn As HanaConnection,
-                            runId As String)
-
-        Using cmd As New HanaCommand(
-            "SELECT P.""DocEntry"", J.""Line_ID"", J.""Credit"" " &
-            "FROM """ & sapSchema & """.""OPCH"" P " &
-            "INNER JOIN """ & sapSchema & """.""JDT1"" J ON P.""TransId"" = J.""TransId"" " &
-            "WHERE P.""TransId"" = " & invTransId &
-            " AND J.""Account"" = '" & controlAccount & "' AND J.""Credit"" > 0", conn)
-
-            Using reader = cmd.ExecuteReader()
-                If reader.Read() Then
-                    docEntry = Convert.ToInt32(reader("DocEntry"))
-                    lineId = Convert.ToInt32(reader("Line_ID"))
-                    actualAmount = Convert.ToDouble(reader("Credit"))
-                Else
-                    Throw New Exception("Invoice JE not found | TransId=" & invTransId)
-                End If
-            End Using
-
+    Private Sub SlLogout(cookies As String)
+        Using client As New HttpClient()
+            client.DefaultRequestHeaders.Add("Cookie", cookies)
+            Dim _ = client.PostAsync($"{slUrl}/Logout", Nothing).Result
         End Using
-
     End Sub
 
-    Private Sub GetPaymentJEInfo(paymentDocEntry As Integer,
-                            ByRef transId As Integer,
-                            ByRef lineId As Integer,
-                            conn As HanaConnection,
-                            runId As String)
+    Private Sub UpdateReconciled(conn As HanaConnection, id As String, state As String)
+        Dim sql As String = $"UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""Reconciled""='{state}' WHERE ""Id""='{id}'"
+        Using cmd As New HanaCommand(sql, conn)
+            cmd.ExecuteNonQuery()
+        End Using
+    End Sub
 
-        Using cmd As New HanaCommand(
-            "SELECT V.""TransId"", J.""Line_ID"" " &
-            "FROM """ & sapSchema & """.""OVPM"" V " &
-            "INNER JOIN """ & sapSchema & """.""JDT1"" J ON V.""TransId"" = J.""TransId"" " &
-            "WHERE V.""DocEntry"" = " & paymentDocEntry &
-            " AND J.""Debit"" > 0 AND J.""Account"" <> '" & DBSBankGLAccount & "'", conn)
-
-            Using reader = cmd.ExecuteReader()
+    Private Function GetPaymentJEInfo(conn As HanaConnection, paymentDocEntry As Integer, vendorCode As String) As Tuple(Of Integer, Integer)
+        Dim sql As String = $"
+            SELECT V.""TransId"", J.""Line_ID"" 
+            FROM ""{sapSchema}"".""OVPM"" V 
+            INNER JOIN ""{sapSchema}"".""JDT1"" J ON V.""TransId"" = J.""TransId"" 
+            WHERE V.""DocEntry"" = {paymentDocEntry} 
+            AND J.""Debit"" > 0 AND J.""ShortName"" = '{vendorCode}'
+        "
+        Using cmd As New HanaCommand(sql, conn)
+            Using reader As HanaDataReader = cmd.ExecuteReader()
                 If reader.Read() Then
-                    transId = Convert.ToInt32(reader("TransId"))
-                    lineId = Convert.ToInt32(reader("Line_ID"))
-                Else
-                    Throw New Exception("Payment JE not found | DocEntry=" & paymentDocEntry)
+                    Return New Tuple(Of Integer, Integer)(reader.GetInt32(0), reader.GetInt32(1))
                 End If
             End Using
-
         End Using
+        Throw New Exception($"Payment JE not found | DocEntry={paymentDocEntry}")
+    End Function
 
+    Private Function GetInvoiceJEInfo(conn As HanaConnection, invTransId As Integer, vendorCode As String) As Tuple(Of Integer, Double)
+        Dim sql As String = $"
+            SELECT J.""Line_ID"", J.""Debit"", J.""Credit"" 
+            FROM ""{sapSchema}"".""JDT1"" J 
+            WHERE J.""TransId"" = {invTransId} 
+            AND J.""ShortName"" = '{vendorCode}'
+        "
+        Using cmd As New HanaCommand(sql, conn)
+            Using reader As HanaDataReader = cmd.ExecuteReader()
+                If reader.Read() Then
+                    Dim debit As Double = reader.GetDouble(1)
+                    Dim credit As Double = reader.GetDouble(2)
+                    Dim maxAmt As Double = Math.Max(debit, credit)
+                    Return New Tuple(Of Integer, Double)(reader.GetInt32(0), maxAmt)
+                End If
+            End Using
+        End Using
+        Throw New Exception($"Invoice JE line not found | TransId={invTransId} | BP={vendorCode}")
+    End Function
+
+    Private Sub ReconcilePayment(cookies As String, conn As HanaConnection, vendor As String, paymentDocEntry As Integer, invoicesJson As String, runId As String)
+        
+        ' 1. Get Payment JE Line Details
+        Dim payInfo = GetPaymentJEInfo(conn, paymentDocEntry, vendor)
+        Dim payTransId As Integer = payInfo.Item1
+        Dim payLineId As Integer = payInfo.Item2
+        Logger.Log("[" & runId & "] Payment JE | TransId=" & payTransId & " | LineId=" & payLineId)
+
+        ' 2. Initialize Service Layer DI-API wrapper payload
+        Dim payloadObj As New JObject()
+        Dim internalReconObj As New JObject()
+        internalReconObj("CardOrAccount") = "coaCard"
+        Dim rowsArray As New JArray()
+        
+        Dim totalAmount As Double = 0.0
+        Dim invoices As JArray = JArray.Parse(invoicesJson)
+
+        ' 3. Extract Invoice JE Lines
+        For Each inv In invoices
+            Dim invTransId As Integer = CInt(inv("InvoiceNumber"))
+            Dim amount As Double = CDbl(inv("Amount"))
+            
+            Dim invInfo = GetInvoiceJEInfo(conn, invTransId, vendor)
+            Dim invLineId As Integer = invInfo.Item1
+            
+            Logger.Log("[" & runId & "] Invoice | TransId=" & invTransId & " | LineId=" & invLineId & " | ReconAmount=" & amount)
+            
+            Dim invRow As New JObject()
+            invRow("Selected") = "tYES"
+            invRow("ShortName") = vendor
+            invRow("TransId") = invTransId
+            invRow("TransRowId") = invLineId
+            invRow("ReconcileAmount") = Math.Abs(amount)
+            rowsArray.Add(invRow)
+            
+            totalAmount += Math.Abs(amount)
+        Next
+        
+        Logger.Log("[" & runId & "] Total Invoice Amount = " & totalAmount)
+        
+        ' 4. Add the Payment Row to balance it exactly
+        Dim payRow As New JObject()
+        payRow("Selected") = "tYES"
+        payRow("ShortName") = vendor
+        payRow("TransId") = payTransId
+        payRow("TransRowId") = payLineId
+        payRow("ReconcileAmount") = totalAmount
+        rowsArray.Add(payRow)
+        
+        ' 5. Wrap everything inside InternalReconciliationOpenTrans
+        internalReconObj("InternalReconciliationOpenTransRows") = rowsArray
+        payloadObj("InternalReconciliationOpenTrans") = internalReconObj
+        Dim payloadStr As String = JsonConvert.SerializeObject(payloadObj)
+        
+        ' 6. Post to the Hidden Service Layer Action Endpoint
+        Logger.Log("[" & runId & "] Posting reconciliation to Service Layer...")
+        Using client As New HttpClient()
+            client.DefaultRequestHeaders.Add("Cookie", cookies)
+            Dim url As String = $"{slUrl}/InternalReconciliationsService_Add"
+            Dim content As New StringContent(payloadStr, Encoding.UTF8, "application/json")
+            
+            Dim response = client.PostAsync(url, content).Result
+            If response.IsSuccessStatusCode OrElse response.StatusCode = HttpStatusCode.Created OrElse response.StatusCode = HttpStatusCode.NoContent Then
+                Logger.Log("[" & runId & "] Reconciliation DONE | PaymentDocEntry=" & paymentDocEntry)
+            Else
+                Throw New Exception($"Service Layer Error: {response.Content.ReadAsStringAsync().Result}")
+            End If
+        End Using
     End Sub
+
     Public Sub RunManualReco()
         Main()
     End Sub
+
 End Module
