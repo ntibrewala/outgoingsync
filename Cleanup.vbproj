@@ -6,7 +6,7 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProjectGuid>{C2D3E4F5-1111-2222-3333-444455556666}</ProjectGuid>
     <OutputType>Exe</OutputType>
-    <StartupObject>Cleanup.Cleanup</StartupObject>
+    <StartupObject>OutgoingPaymentSync.Cleanup</StartupObject>
     <RootNamespace>OutgoingPaymentSync</RootNamespace>
     <AssemblyName>Cleanup</AssemblyName>
     <FileAlignment>512</FileAlignment>
