@@ -33,6 +33,9 @@
     <Reference Include="Sap.Data.Hana.v4.5">
       <HintPath>C:\Program Files\sap\hdbclient\ado.net\v4.5\Sap.Data.Hana.v4.5.dll</HintPath>
     </Reference>
+    <Reference Include="Bhavya.SAP.Core">
+      <HintPath>D:\SAP_SDK_Global\Bhavya.SAP.Core.dll</HintPath>
+    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Data" />
   </ItemGroup>
