@@ -24,7 +24,10 @@ Module OutgoingPaymentSync
     End Sub
 
     Private Function SlLogin() As String
-        Using client As New HttpClient()
+        Dim handler As New HttpClientHandler()
+        handler.ServerCertificateCustomValidationCallback = Function(message, cert, chain, sslPolicyErrors) True
+        
+        Using client As New HttpClient(handler)
             Dim loginUrl As String = $"{slUrl}/Login"
             
             Dim payloadObj As New JObject()
@@ -32,11 +35,12 @@ Module OutgoingPaymentSync
             payloadObj("UserName") = slUser
             payloadObj("Password") = slPass
             Dim payload As String = JsonConvert.SerializeObject(payloadObj)
-            Console.WriteLine("SL PAYLOAD: " & payload)
             
-            Dim content As New StringContent(payload, Encoding.UTF8, "application/json")
+            Dim request As New HttpRequestMessage(HttpMethod.Post, loginUrl)
+            request.Content = New StringContent(payload, Encoding.UTF8, "application/json")
+            request.Headers.ExpectContinue = False
             
-            Dim response = client.PostAsync(loginUrl, content).Result
+            Dim response = client.SendAsync(request).Result
             If response.IsSuccessStatusCode Then
                 Dim cookies = response.Headers.GetValues("Set-Cookie")
                 Return String.Join(";", cookies)
