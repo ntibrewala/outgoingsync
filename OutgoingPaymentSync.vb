@@ -41,7 +41,7 @@ Module OutgoingPaymentSync
     Private Sub SlLogout(cookies As String)
         Using client As New HttpClient()
             client.DefaultRequestHeaders.Add("Cookie", cookies)
-            Dim _ = client.PostAsync($"{slUrl}/Logout", Nothing).Result
+            Dim dummy = client.PostAsync($"{slUrl}/Logout", Nothing).Result
         End Using
     End Sub
 
