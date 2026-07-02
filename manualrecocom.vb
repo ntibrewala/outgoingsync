@@ -53,6 +53,7 @@ Module manualrecocom
                     AND IFNULL(P.""Reconciled"",'N') IN ('N','1','2') 
                     AND P.""InvoicesJson"" IS NOT NULL 
                     AND TO_NVARCHAR(P.""InvoicesJson"") <> '[]'
+                    LIMIT 1
                 "
 
                 Dim records As New List(Of Object)()
