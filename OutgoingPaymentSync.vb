@@ -40,7 +40,7 @@ Module OutgoingPaymentSync
         payloadObj("Password") = slPass
         Dim payload As String = JsonConvert.SerializeObject(payloadObj)
 
-        Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Login")
+        Dim request As New HttpRequestMessage(HttpMethod.Post, slUrl & "/Login")
         request.Content = New StringContent(payload, Encoding.UTF8, "application/json")
         request.Headers.ExpectContinue = False
 
@@ -71,7 +71,7 @@ Module OutgoingPaymentSync
     Private Sub SlLogout()
         If slClient IsNot Nothing Then
             Try
-                Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Logout")
+                Dim request As New HttpRequestMessage(HttpMethod.Post, slUrl & "/Logout")
                 request.Headers.ExpectContinue = False
                 Dim dummy = slClient.SendAsync(request).Result
             Catch
@@ -105,8 +105,7 @@ Module OutgoingPaymentSync
                 If HasStatusUpdates(conn) Then
                     Logger.Log("[" & runId & "] Updating bank payment statuses")
 
-                    Using cmd As New HanaCommand(
-                        "CALL ""DBS_BANK"".""BHV_UPDATE_PAYMENT_STATUS""()", conn)
+                    Using cmd As New HanaCommand("CALL ""DBS_BANK"".""BHV_UPDATE_PAYMENT_STATUS""()", conn)
                         cmd.ExecuteNonQuery()
                     End Using
 
@@ -145,16 +144,13 @@ Module OutgoingPaymentSync
 
     '============================================================
     Function HasStatusUpdates(conn As HanaConnection) As Boolean
-        Using cmd As New HanaCommand(
-            "SELECT 1 FROM ""DBS_BANK"".""PENDING_PAYMENTS"" WHERE ""BankStatus""='PENDING' LIMIT 1", conn)
+        Using cmd As New HanaCommand("SELECT 1 FROM ""DBS_BANK"".""PENDING_PAYMENTS"" WHERE ""BankStatus""='PENDING' LIMIT 1", conn)
             Return cmd.ExecuteScalar() IsNot Nothing
         End Using
     End Function
 
     Function HasCompletedPayments(conn As HanaConnection) As Boolean
-        Using cmd As New HanaCommand(
-            "SELECT 1 FROM ""DBS_BANK"".""PENDING_PAYMENTS"" " &
-            "WHERE ""BankStatus""='COMPLETED' AND IFNULL(""Processed"",'N')='N' LIMIT 1", conn)
+        Using cmd As New HanaCommand("SELECT 1 FROM ""DBS_BANK"".""PENDING_PAYMENTS"" WHERE ""BankStatus""='COMPLETED' AND IFNULL(""Processed"",'N')='N' LIMIT 1", conn)
             Return cmd.ExecuteScalar() IsNot Nothing
         End Using
     End Function
@@ -170,25 +166,23 @@ Module OutgoingPaymentSync
 
                     Dim id As String = reader("Id").ToString()
                     Dim vendor As String = reader("VendorCode").ToString()
-                    Dim amount As Double = Double.Parse(
-                        reader("PaymentAmount").ToString().Replace(",", ""),
-                        System.Globalization.CultureInfo.InvariantCulture)
+                    Dim amount As Double = Double.Parse(reader("PaymentAmount").ToString().Replace(",", ""), System.Globalization.CultureInfo.InvariantCulture)
 
                     Dim txnDate As Date = GetApprovedDate(conn, id)
 
-                    Logger.Log($"[{runId}] Processing ID={id} | Date={txnDate:yyyy-MM-dd}")
+                    Logger.Log("[" & runId & "] Processing ID=" & id & " | Date=" & txnDate.ToString("yyyy-MM-dd"))
 
                     Try
                         Dim paymentDocEntry As Integer = CreateOutgoingPayment(vendor, amount, txnDate, conn)
                         UpdatePaymentProcessed(id, paymentDocEntry, conn)
-                        Logger.Log($"[{runId}] SUCCESS | ID={id} | DocEntry={paymentDocEntry}")
+                        Logger.Log("[" & runId & "] SUCCESS | ID=" & id & " | DocEntry=" & paymentDocEntry.ToString())
 
                     Catch ex As Exception
                         UpdatePaymentError(id, ex.Message, conn)
-                        Logger.Log($"[{runId}] ERROR | ID={id} | {ex.Message}")
+                        Logger.Log("[" & runId & "] ERROR | ID=" & id & " | " & ex.Message)
                         
                         ' Reset Service Layer session in case the error corrupted the backend DI context
-                        Logger.Log($"[{runId}] Resetting Service Layer session due to error...")
+                        Logger.Log("[" & runId & "] Resetting Service Layer session due to error...")
                         SlLogout()
                         SlLogin()
                     End Try
@@ -201,8 +195,7 @@ Module OutgoingPaymentSync
 
     '============================================================
     Function GetApprovedDate(conn As HanaConnection, id As String) As Date
-        Using cmd As New HanaCommand(
-        "SELECT ""ApprovedAt"" FROM ""DBS_BANK"".""PENDING_PAYMENTS"" WHERE ""Id""=?", conn)
+        Using cmd As New HanaCommand("SELECT ""ApprovedAt"" FROM ""DBS_BANK"".""PENDING_PAYMENTS"" WHERE ""Id""=?", conn)
             cmd.Parameters.AddWithValue("p1", id)
             Dim result = cmd.ExecuteScalar()
             If result IsNot Nothing Then
@@ -216,8 +209,17 @@ Module OutgoingPaymentSync
     Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date, conn As HanaConnection) As Integer
 
         ' Determine CardType from HANA
+
+        ' ANTI-DUPLICATE CHECK: See if we already created a payment for this Bank ID
+        Using chkCmd As New HanaCommand("SELECT ""DocEntry"" FROM """ & sapSchema & """.""OVPM"" WHERE ""Comments"" = 'DBS ID: " & id & "'", conn)
+            Dim existingEntry = chkCmd.ExecuteScalar()
+            If existingEntry IsNot Nothing Then
+                Return Convert.ToInt32(existingEntry)
+            End If
+        End Using
+
         Dim cardType As String = ""
-        Using cmd As New HanaCommand($"SELECT ""CardType"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""=?", conn)
+        Using cmd As New HanaCommand("SELECT ""CardType"" FROM """ & sapSchema & """.""OCRD"" WHERE ""CardCode""=?", conn)
             cmd.Parameters.AddWithValue("p_vendor", vendor)
             Using reader = cmd.ExecuteReader()
                 If reader.Read() Then
@@ -231,7 +233,7 @@ Module OutgoingPaymentSync
         payloadObj("TransferSum") = amount
         payloadObj("TransferDate") = txnDate.ToString("yyyy-MM-dd")
         payloadObj("DocDate") = txnDate.ToString("yyyy-MM-dd")
-        payloadObj("Remarks") = "DBS Payment - " & vendor
+        payloadObj("Remarks") = "DBS ID: " & id
 
         If cardType = "S" OrElse cardType = "C" Then
             payloadObj("CardCode") = vendor
@@ -241,7 +243,7 @@ Module OutgoingPaymentSync
             payloadObj("DocType") = "rAccount"
 
             Dim controlAcct As String = "210001"
-            Using cmd As New HanaCommand($"SELECT ""DebPayAcct"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""=?", conn)
+            Using cmd As New HanaCommand("SELECT ""DebPayAcct"" FROM """ & sapSchema & """.""OCRD"" WHERE ""CardCode""=?", conn)
                 cmd.Parameters.AddWithValue("p_vendor", vendor)
                 Using reader = cmd.ExecuteReader()
                     If reader.Read() Then controlAcct = reader("DebPayAcct").ToString()
@@ -259,7 +261,7 @@ Module OutgoingPaymentSync
 
         Dim payloadStr As String = JsonConvert.SerializeObject(payloadObj)
 
-        Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/VendorPayments")
+        Dim request As New HttpRequestMessage(HttpMethod.Post, slUrl & "/VendorPayments")
         request.Content = New StringContent(payloadStr, Encoding.UTF8, "application/json")
         request.Headers.ExpectContinue = False
 
@@ -275,16 +277,14 @@ Module OutgoingPaymentSync
 
     '============================================================
     Sub UpdatePaymentProcessed(id As String, docEntry As Integer, conn As HanaConnection)
-        Using cmd As New HanaCommand(
-            "CALL ""DBS_BANK"".""BHV_MARK_PAYMENT_PROCESSED""(?,?)", conn)
+        Using cmd As New HanaCommand("CALL ""DBS_BANK"".""BHV_MARK_PAYMENT_PROCESSED""(?,?)", conn)
             cmd.Parameters.AddWithValue("p_id", id)
             cmd.Parameters.AddWithValue("p_docnum", docEntry)
             cmd.ExecuteNonQuery()
         End Using
 
         ' Clear error
-        Using cmd2 As New HanaCommand(
-            "UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""ErrorDescription""='' WHERE ""Id""=?", conn)
+        Using cmd2 As New HanaCommand("UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""ErrorDescription""='' WHERE ""Id""=?", conn)
             cmd2.Parameters.AddWithValue("p_id", id)
             cmd2.ExecuteNonQuery()
         End Using
@@ -292,8 +292,7 @@ Module OutgoingPaymentSync
 
     Sub UpdatePaymentError(id As String, errorMsg As String, conn As HanaConnection)
         Dim safeError = If(errorMsg.Length > 500, errorMsg.Substring(0, 500), errorMsg)
-        Using cmd As New HanaCommand(
-            "UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""ErrorDescription""=? WHERE ""Id""=?", conn)
+        Using cmd As New HanaCommand("UPDATE ""DBS_BANK"".""PENDING_PAYMENTS"" SET ""ErrorDescription""=? WHERE ""Id""=?", conn)
             cmd.Parameters.AddWithValue("p_error", safeError)
             cmd.Parameters.AddWithValue("p_id", id)
             cmd.ExecuteNonQuery()
