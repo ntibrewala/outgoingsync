@@ -216,7 +216,17 @@ Module OutgoingPaymentSync
     Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date, conn As HanaConnection) As Integer
 
         ' Determine CardType from HANA
+
+        ' ANTI-DUPLICATE CHECK: See if we already created a payment for this Bank ID
+        Using chkCmd As New HanaCommand($"SELECT ""DocEntry"" FROM ""{sapSchema}"".""OVPM"" WHERE ""Comments"" = 'DBS ID: {id}'", conn)
+            Dim existingEntry = chkCmd.ExecuteScalar()
+            If existingEntry IsNot Nothing Then
+                Return Convert.ToInt32(existingEntry)
+            End If
+        End Using
+
         Dim cardType As String = ""
+
         Using cmd As New HanaCommand($"SELECT ""CardType"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""=?", conn)
             cmd.Parameters.AddWithValue("p_vendor", vendor)
             Using reader = cmd.ExecuteReader()
@@ -231,7 +241,7 @@ Module OutgoingPaymentSync
         payloadObj("TransferSum") = amount
         payloadObj("TransferDate") = txnDate.ToString("yyyy-MM-dd")
         payloadObj("DocDate") = txnDate.ToString("yyyy-MM-dd")
-        payloadObj("Remarks") = "DBS Payment - " & vendor
+        payloadObj("Remarks") = "DBS ID: " & id
 
         If cardType = "S" OrElse cardType = "C" Then
             payloadObj("CardCode") = vendor
