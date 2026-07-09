@@ -54,7 +54,7 @@ Module manualrecocom
                     AND IFNULL(P.""Reconciled"",'N') = 'N' 
                     AND P.""InvoicesJson"" IS NOT NULL 
                     AND TO_NVARCHAR(P.""InvoicesJson"") <> '[]'
-                    LIMIT 1
+                    
                 "
 
                 Dim records As New List(Of Object)()
@@ -285,7 +285,20 @@ Module manualrecocom
 
         Dim response = slClient.SendAsync(request).Result
         If response.IsSuccessStatusCode OrElse response.StatusCode = HttpStatusCode.Created OrElse response.StatusCode = HttpStatusCode.NoContent Then
-            Logger.Log("[" & runId & "] Reconciliation DONE | PaymentDocEntry=" & paymentDocEntry)
+            
+            Dim reconNum As String = "UNKNOWN"
+            Try
+                Dim respText As String = response.Content.ReadAsStringAsync().Result
+                If Not String.IsNullOrWhiteSpace(respText) Then
+                    Dim jsonResp As JObject = JObject.Parse(respText)
+                    If jsonResp("ReconNum") IsNot Nothing Then
+                        reconNum = jsonResp("ReconNum").ToString()
+                    End If
+                End If
+            Catch
+            End Try
+
+            Logger.Log($"[{runId}] Reconciliation DONE | PaymentDocEntry={paymentDocEntry} | ReconNum={reconNum}")
         Else
             Throw New Exception($"Service Layer Error: {response.Content.ReadAsStringAsync().Result}")
         End If
