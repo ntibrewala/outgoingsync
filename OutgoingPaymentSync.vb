@@ -40,7 +40,7 @@ Module OutgoingPaymentSync
         payloadObj("Password") = slPass
         Dim payload As String = JsonConvert.SerializeObject(payloadObj)
 
-        Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Login")
+        Dim request As New HttpRequestMessage(HttpMethod.Post, slUrl & "/Login")
         request.Content = New StringContent(payload, Encoding.UTF8, "application/json")
         request.Headers.ExpectContinue = False
 
@@ -71,7 +71,7 @@ Module OutgoingPaymentSync
     Private Sub SlLogout()
         If slClient IsNot Nothing Then
             Try
-                Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/Logout")
+                Dim request As New HttpRequestMessage(HttpMethod.Post, slUrl & "/Logout")
                 request.Headers.ExpectContinue = False
                 Dim dummy = slClient.SendAsync(request).Result
             Catch
