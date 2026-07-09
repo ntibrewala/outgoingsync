@@ -176,19 +176,19 @@ Module OutgoingPaymentSync
 
                     Dim txnDate As Date = GetApprovedDate(conn, id)
 
-                    Logger.Log($"[{runId}] Processing ID={id} | Date={txnDate:yyyy-MM-dd}")
+                    Logger.Log("[" & runId & "] Processing ID=" & id & " | Date=" & txnDate.ToString("yyyy-MM-dd"))
 
                     Try
                         Dim paymentDocEntry As Integer = CreateOutgoingPayment(vendor, amount, txnDate, conn, id)
                         UpdatePaymentProcessed(id, paymentDocEntry, conn)
-                        Logger.Log($"[{runId}] SUCCESS | ID={id} | DocEntry={paymentDocEntry}")
+                        Logger.Log("[" & runId & "] SUCCESS | ID=" & id & " | DocEntry=" & paymentDocEntry.ToString())
 
                     Catch ex As Exception
                         UpdatePaymentError(id, ex.Message, conn)
-                        Logger.Log($"[{runId}] ERROR | ID={id} | {ex.Message}")
+                        Logger.Log("[" & runId & "] ERROR | ID=" & id & " | " & ex.Message)
                         
                         ' Reset Service Layer session in case the error corrupted the backend DI context
-                        Logger.Log($"[{runId}] Resetting Service Layer session due to error...")
+                        Logger.Log("[" & runId & "] Resetting Service Layer session due to error...")
                         SlLogout()
                         SlLogin()
                     End Try
@@ -227,7 +227,7 @@ Module OutgoingPaymentSync
 
         Dim cardType As String = ""
 
-        Using cmd As New HanaCommand($"SELECT ""CardType"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""=?", conn)
+        Using cmd As New HanaCommand("SELECT ""CardType"" FROM """ & sapSchema & """.""OCRD"" WHERE ""CardCode""=?", conn)
             cmd.Parameters.AddWithValue("p_vendor", vendor)
             Using reader = cmd.ExecuteReader()
                 If reader.Read() Then
@@ -251,7 +251,7 @@ Module OutgoingPaymentSync
             payloadObj("DocType") = "rAccount"
 
             Dim controlAcct As String = "210001"
-            Using cmd As New HanaCommand($"SELECT ""DebPayAcct"" FROM ""{sapSchema}"".""OCRD"" WHERE ""CardCode""=?", conn)
+            Using cmd As New HanaCommand("SELECT ""DebPayAcct"" FROM """ & sapSchema & """.""OCRD"" WHERE ""CardCode""=?", conn)
                 cmd.Parameters.AddWithValue("p_vendor", vendor)
                 Using reader = cmd.ExecuteReader()
                     If reader.Read() Then controlAcct = reader("DebPayAcct").ToString()
@@ -269,7 +269,7 @@ Module OutgoingPaymentSync
 
         Dim payloadStr As String = JsonConvert.SerializeObject(payloadObj)
 
-        Dim request As New HttpRequestMessage(HttpMethod.Post, $"{slUrl}/VendorPayments")
+        Dim request As New HttpRequestMessage(HttpMethod.Post, slUrl & "/VendorPayments")
         request.Content = New StringContent(payloadStr, Encoding.UTF8, "application/json")
         request.Headers.ExpectContinue = False
 
