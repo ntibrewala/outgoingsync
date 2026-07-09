@@ -179,7 +179,7 @@ Module OutgoingPaymentSync
                     Logger.Log($"[{runId}] Processing ID={id} | Date={txnDate:yyyy-MM-dd}")
 
                     Try
-                        Dim paymentDocEntry As Integer = CreateOutgoingPayment(vendor, amount, txnDate, conn)
+                        Dim paymentDocEntry As Integer = CreateOutgoingPayment(vendor, amount, txnDate, conn, id)
                         UpdatePaymentProcessed(id, paymentDocEntry, conn)
                         Logger.Log($"[{runId}] SUCCESS | ID={id} | DocEntry={paymentDocEntry}")
 
@@ -213,12 +213,12 @@ Module OutgoingPaymentSync
     End Function
 
     '============================================================
-    Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date, conn As HanaConnection) As Integer
+    Function CreateOutgoingPayment(vendor As String, amount As Double, txnDate As Date, conn As HanaConnection, id As String) As Integer
 
         ' Determine CardType from HANA
 
         ' ANTI-DUPLICATE CHECK: See if we already created a payment for this Bank ID
-        Using chkCmd As New HanaCommand($"SELECT ""DocEntry"" FROM ""{sapSchema}"".""OVPM"" WHERE ""Comments"" = 'DBS ID: {id}'", conn)
+        Using chkCmd As New HanaCommand("SELECT ""DocEntry"" FROM """ & sapSchema & """.""OVPM"" WHERE ""Comments"" = 'DBS ID: " & id & "'", conn)
             Dim existingEntry = chkCmd.ExecuteScalar()
             If existingEntry IsNot Nothing Then
                 Return Convert.ToInt32(existingEntry)
